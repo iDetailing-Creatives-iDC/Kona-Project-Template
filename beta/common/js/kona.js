@@ -1,6 +1,6 @@
 "use strict";
 
-const BUILD_ID = "kona library __20261022-121532-cgen6zu__";
+const BUILD_ID = "kona library __20261023-183032-9qxciy6__";
 console.log("%cBuild:", "color:#888", BUILD_ID);
 
 (function (global) {
@@ -551,7 +551,14 @@ const crm = {
         },
         approvedDocument: {
           name: "Approved_Document_vod__c",
-          fields: { id: "ID", name: "Name", description: "Document_Description_vod__c", vaultDocumentId: "Vault_Document_Id_vod__c" },
+          fields: {
+            id: "ID",
+            name: "Name",
+            description: "Document_Description_vod__c",
+            vaultDocumentId: "Vault_Document_ID_vod__c",
+            vaultInstanceId: "Vault_Instance_ID_vod__c",
+            status: { name: "Status_vod__c", values: { approved: "Approved_vod" } },
+          },
         },
         callClickstream: {
           name: "Call_Clickstream_vod__c",
@@ -720,7 +727,14 @@ const crm = {
         },
         approvedDocument: {
           name: "approved_document__v",
-          fields: { id: "id", name: "name__v", description: "document_description__v", vaultDocumentId: "vault_document_id__v" },
+          fields: {
+            id: "id",
+            name: "name__v",
+            description: "document_description__v",
+            vaultDocumentId: "vault_document_id__v",
+            vaultInstanceId: "vault_instance_id__v",
+            status: { name: "approved_document_status__v", values: { approved: "approved__v" } },
+          },
         },
         callClickstream: {
           name: "call_clickstream__v",
@@ -9557,6 +9571,12 @@ const interactionSummary = {
     return result;
   },
 
+  //CRM id of an email template or fragment for matching sent emails: the approved document id (crmId, context objects priority 3),
+  //or until then the id read for the history (historyCrmId, priority 2)
+  emailCrmId: function (pItem) {
+    return pItem.crmId || pItem.historyCrmId || null;
+  },
+
   api: {
     generateDataModel: function (pAccountId) {
       const vars = clm.vars;
@@ -9568,6 +9588,7 @@ const interactionSummary = {
       const nonEmailCartItems = interactionSummary.nonEmailCartItems;
       const labels = interactionSummary.labels;
       const fields = interactionSummary.fields;
+      const crmIdOf = interactionSummary.emailCrmId; //approved document id, or the history id until context objects priority 3 has read it
 
       //set processing flag
       output.processing = true;
@@ -9948,7 +9969,7 @@ const interactionSummary = {
 
                     //bypass this filtering if considerEmailsWithOtherTemplates is true
                     if (!options.considerEmailsWithOtherTemplates) {
-                      let templateCrmIds = allTemplates.filter((template) => template.crmId).map((template) => template.crmId);
+                      let templateCrmIds = allTemplates.map(crmIdOf).filter((crmId) => crmId);
 
                       //no sent emails if no templates have crmId (skip the query only; the rest of the model, e.g. allAccounts, is still built)
                       if (templateCrmIds.length == 0) {
@@ -9959,21 +9980,22 @@ const interactionSummary = {
                       templateCondition = { field: "emailTemplateId", value: templateCrmIds };
                     }
 
-                    // Split accounts into batches of 10
+                    // Accounts: the current account, or all accounts
                     let accountsToProcess = [];
                     if (pAccountId) {
                       accountsToProcess.push(vars.metadata.account);
                     } else {
                       accountsToProcess = vars.metadata.allAccounts;
                     }
-                    const accountBatches = noTemplatesWithCrmId ? [] : util.chunkArray(accountsToProcess, 10);
+                    // All accounts filtered by template: one query, records kept for the accounts in the list
+                    // (by account it was one query per 10 accounts: 127 queries, 2.3 s for 1,265 accounts)
+                    const byTemplateOnly = !pAccountId && templateCondition;
+                    const accountBatches = noTemplatesWithCrmId ? [] : byTemplateOnly ? [null] : util.chunkArray(accountsToProcess, 10);
 
                     // Process each batch and collect all results
                     for (const accountBatch of accountBatches) {
-                      let conditions = [
-                        { field: "status", value: ["sent", "delivered"] },
-                        { field: "accountId", value: accountBatch.map((account) => account.id) },
-                      ];
+                      let conditions = [{ field: "status", value: ["sent", "delivered"] }];
+                      if (accountBatch) conditions.push({ field: "accountId", value: accountBatch.map((account) => account.id) });
                       if (templateCondition) conditions.push(templateCondition);
 
                       let result = await crm.query("sentEmail", fields.sentEmail, conditions);
@@ -9981,6 +10003,10 @@ const interactionSummary = {
 
                       // Append batch results to main sentEmailRecords array
                       sentEmailRecords = sentEmailRecords.concat(result.records);
+                    }
+                    if (byTemplateOnly) {
+                      const accountIds = new Set(accountsToProcess.map((account) => account.id));
+                      sentEmailRecords = sentEmailRecords.filter((sentEmail) => accountIds.has(sentEmail.accountId));
                     }
                   }
 
@@ -9999,16 +10025,16 @@ const interactionSummary = {
 
                     sentEmailRecords.forEach((sentEmail) => {
                       let templateIndex = nonEmailCartItems.templates.findIndex((template) => {
-                        return template.crmId == sentEmail.emailTemplateId;
+                        return crmIdOf(template) == sentEmail.emailTemplateId;
                       });
                       if (templateIndex < 0 && vars.emailCart.active) {
                         templateIndex = vars.emailCart.templates.findIndex((template) => {
-                          return template.crmId == sentEmail.emailTemplateId;
+                          return crmIdOf(template) == sentEmail.emailTemplateId;
                         });
                       }
                       if (templateIndex < 0 && vars.rteBuilder.active) {
                         templateIndex = vars.rteBuilder.templates.findIndex((template) => {
-                          return template.crmId == sentEmail.emailTemplateId;
+                          return crmIdOf(template) == sentEmail.emailTemplateId;
                         });
                       }
 
@@ -10418,17 +10444,17 @@ const interactionSummary = {
                       {
                         //try to find in email cart templates
                         if (vars.emailCart.active) {
-                          template = vars.emailCart.templates.find((template) => template.crmId == sentEmail.emailTemplateId);
+                          template = vars.emailCart.templates.find((template) => crmIdOf(template) == sentEmail.emailTemplateId);
                           if (template) templateType = "emailCart";
                         }
                         //try to find in non email cart templates
                         if (!template) {
-                          template = nonEmailCartItems.templates.find((template) => template.crmId == sentEmail.emailTemplateId);
+                          template = nonEmailCartItems.templates.find((template) => crmIdOf(template) == sentEmail.emailTemplateId);
                           if (template) templateType = "nonEmailCartItems";
                         }
                         //try to find in rteBuilder templates
                         if (!template && vars.rteBuilder.active) {
-                          template = vars.rteBuilder.templates.find((template) => template.crmId == sentEmail.emailTemplateId);
+                          template = vars.rteBuilder.templates.find((template) => crmIdOf(template) == sentEmail.emailTemplateId);
                           if (template) templateType = "rteBuilder";
                         }
                         if (!template) return;
@@ -10449,11 +10475,11 @@ const interactionSummary = {
                           //search fragment
                           let fragment;
                           if (templateType == "emailCart") {
-                            fragment = vars.emailCart.fragments.find((fragment) => fragment.crmId == fragmentID);
+                            fragment = vars.emailCart.fragments.find((fragment) => crmIdOf(fragment) == fragmentID);
                           } else if (templateType == "rteBuilder") {
-                            fragment = vars.rteBuilder.fragments.find((fragment) => fragment.crmId == fragmentID);
+                            fragment = vars.rteBuilder.fragments.find((fragment) => crmIdOf(fragment) == fragmentID);
                           } else if (templateType == "nonEmailCartItems") {
-                            fragment = template.fragments.find((fragment) => fragment.crmId == fragmentID);
+                            fragment = template.fragments.find((fragment) => crmIdOf(fragment) == fragmentID);
                           }
                           if (!fragment) return;
 
@@ -10475,7 +10501,7 @@ const interactionSummary = {
                           fragmentRecord.clicks = 0;
 
                           input.emailActivities.filter(
-                            (emailActivity) => emailActivity.sentEmailId == sentEmail.id && emailActivity.approvedDocumentId == fragment.crmId,
+                            (emailActivity) => emailActivity.sentEmailId == sentEmail.id && emailActivity.approvedDocumentId == crmIdOf(fragment),
                           ).forEach((emailActivity) => {
                             if (!emailActivity.approvedDocumentId) return; //only events for approved documents (email fragments)
                             if (emailActivity.eventType != "clicked") return; //only click events
@@ -10587,7 +10613,7 @@ const interactionSummary = {
                     //populate id and title
                     record.id = template.id;
                     record.title = template.title;
-                    record.crmId = template.crmId;
+                    record.crmId = crmIdOf(template);
                     record.isEmailCart = true;
                     record.thumbnail = template.thumb;
 
@@ -10601,7 +10627,7 @@ const interactionSummary = {
                         //populate id and title
                         fragmentRecord.id = fragment.id;
                         //fragmentRecord.title = fragment.title;
-                        fragmentRecord.crmId = fragment.crmId;
+                        fragmentRecord.crmId = crmIdOf(fragment);
 
                         //add to array
                         record.fragments.push(fragmentRecord);
@@ -10626,7 +10652,7 @@ const interactionSummary = {
                     //populate id and title
                     record.id = template.id;
                     //record.title = template.title;
-                    record.crmId = template.crmId;
+                    record.crmId = crmIdOf(template);
                     //record.thumbnail = template.thumb;
 
                     //fragments
@@ -10637,7 +10663,7 @@ const interactionSummary = {
                       //populate id and title
                       fragmentRecord.id = fragment.id;
                       /*fragmentRecord.title = fragment.title;*/
-                      fragmentRecord.crmId = fragment.crmId;
+                      fragmentRecord.crmId = crmIdOf(fragment);
 
                       //add to array
                       record.fragments.push(fragmentRecord);
@@ -10656,14 +10682,14 @@ const interactionSummary = {
                       let record = JSON.parse(JSON.stringify(emailTemplate));
 
                       record.id = template.id;
-                      record.crmId = template.crmId;
+                      record.crmId = crmIdOf(template);
 
                       let rteFragments = vars.rteBuilder.fragments.filter((f) => template.fragmentIds.includes(f.id));
                       let fragmentTemplate = record.fragments.splice(0)[0];
                       rteFragments.forEach((fragment) => {
                         let fragmentRecord = JSON.parse(JSON.stringify(fragmentTemplate));
                         fragmentRecord.id = fragment.id;
-                        fragmentRecord.crmId = fragment.crmId;
+                        fragmentRecord.crmId = crmIdOf(fragment);
                         record.fragments.push(fragmentRecord);
                       });
                       if (rteFragments.length == 0) {
@@ -11660,7 +11686,7 @@ const interactionSummary = {
 
       vars.emailCart.templates.forEach((template) => {
         //template stats
-        let templateInInteractionSummary = output.currentAccount.emails.find((email) => email.crmId == template.crmId);
+        let templateInInteractionSummary = output.currentAccount.emails.find((email) => email.crmId == interactionSummary.emailCrmId(template));
         if (templateInInteractionSummary) {
           const overall = templateInInteractionSummary.overall;
           template.stats.sent = overall.sent;
@@ -11672,7 +11698,7 @@ const interactionSummary = {
         //fragments stats
         if (!templateInInteractionSummary || vars.emailCart.fragments.length == 0 || vars.emailCart.templates.length > 1) return;
         vars.emailCart.fragments.forEach((fragment) => {
-          let fragmentInInteractionSummary = templateInInteractionSummary.fragments.find((f) => f.crmId == fragment.crmId);
+          let fragmentInInteractionSummary = templateInInteractionSummary.fragments.find((f) => f.crmId == interactionSummary.emailCrmId(fragment));
           if (fragmentInInteractionSummary) {
             const overall = fragmentInInteractionSummary.overall;
             fragment.stats.sent = overall.sent;
@@ -11693,10 +11719,10 @@ const interactionSummary = {
       if (output.currentAccount.account.flags.noActivity) return;
 
       vars.rteBuilder.templates.forEach((template) => {
-        let templateInInteractionSummary = output.currentAccount.emails.find((email) => email.crmId == template.crmId);
+        let templateInInteractionSummary = output.currentAccount.emails.find((email) => email.crmId == interactionSummary.emailCrmId(template));
         if (!templateInInteractionSummary) return;
         vars.rteBuilder.fragments.filter((fragment) => template.fragmentIds.includes(fragment.id)).forEach((fragment) => {
-          let fragmentInInteractionSummary = templateInInteractionSummary.fragments.find((f) => f.crmId == fragment.crmId);
+          let fragmentInInteractionSummary = templateInInteractionSummary.fragments.find((f) => f.crmId == interactionSummary.emailCrmId(fragment));
           if (fragmentInInteractionSummary) {
             fragment.stats.sent = fragmentInInteractionSummary.overall.sent;
             fragment.stats.sentCount = fragmentInInteractionSummary.overall.sentDates ? fragmentInInteractionSummary.overall.sentDates.length : 0;
@@ -27007,15 +27033,22 @@ const clm = {
       });
     }
 
-    //post init tasks -------------------------------------------------
+    //post init tasks (context objects by priority: see contextObjects) -------------------------------
     {
-      //read context objects data
-      await this.getDataForContextObjects();
-      util.dispatchEvent("konaAfterContextObjects", {});
+      //context objects, priority 1: account(s), presentation, key message
+      await this.loadContextObjects(1);
+
+      //smart next (needs only account.id, for auto-launch)
+      if (this.vars.ai.active) {
+        smartNext.init();
+      }
+
+      //context objects, priority 2: related CLM availability, email ids for the interaction summary history
+      await this.loadContextObjects(2);
 
       //ms log
       now = new Date();
-      util.log(`After context objects - ${now - loadingStarted} ms`);
+      util.log(`After context objects (priority 2) - ${now - loadingStarted} ms`);
 
       //automatically build interaction summary model and stats (if an actual call)
       if (interactionSummary.active && this.vars.session.isAnActualCall) {
@@ -27042,13 +27075,21 @@ const clm = {
         ai.init();
       }
 
-      //smart next (after getDataForContextObjects so account.id is available for auto-launch)
-      if (this.vars.ai.active) {
-        smartNext.init();
-      }
-
       //ui after context objects (e.g. media detection / or update item state of related CLM)
       this.uiAfterContextObjects();
+
+      //context objects, priority 3: approved documents the rep can send (slow; after the model, which shares the CRM library queue)
+      await this.loadContextObjects(3);
+      util.dispatchEvent("konaAfterContextObjects", {});
+
+      //ms log
+      now = new Date();
+      util.log(`After context objects - ${now - loadingStarted} ms`);
+
+      //ai: rebuild a context already built, now with the emails the rep can send (sent with the next question)
+      if (this.vars.ai.active && ai.context) {
+        ai.api.context.buildContext();
+      }
     }
   },
 
@@ -28613,408 +28654,516 @@ const clm = {
       resolve();
     });
   },
-  getDataForContextObjects: function () {
-    let sessionData = this.sessionData;
-    let detailedLog = this.vars.options.debugMode.detailedLog;
+  /*context objects -------------------------------------------------------------------------------------
+    CRM records read after konaReady, in priority order (post init tasks in init()). Each priority starts when
+    the previous one is read; a module waits only for the priority it needs (contextObjects.ready(n)):
+      1: account(s) and account types, presentation, key message. Smart Next starts here (account id).
+      2: related CLM availability; CRM ids of the email templates and fragments, for the interaction summary
+         history only (historyCrmId). The interaction summary model and the AI module start here.
+      3: approved documents the rep can send (getApprovedDocument: crmId and available). About 140 ms per item,
+         cached in session data, so it runs last and only the first slide of a session waits for it.
+    konaContextObjects ({ priority }) is dispatched after each priority, konaAfterContextObjects after the last.
+  */
+  contextObjects: {
+    loaded: 0, //last priority read
+    waiting: [], //[{ priority, resolve }]
+    forceDisabledCache: false, //used for developing/debugging, will disable cache even if available
+    approvedDocumentItems: null, //items read in priority 2 and looked up in priority 3
 
-    //only for actual calls
+    //promise resolved when pPriority has been read
+    ready: function (pPriority) {
+      return new Promise((resolve) => {
+        if (this.loaded >= pPriority) resolve();
+        else this.waiting.push({ priority: pPriority, resolve: resolve });
+      });
+    },
+    setLoaded: function (pPriority) {
+      this.loaded = pPriority;
+      this.waiting = this.waiting.filter((item) => {
+        if (item.priority > pPriority) return true;
+        item.resolve();
+        return false;
+      });
+    },
+  },
+  loadContextObjects: async function (pPriority) {
     if (this.vars.options.browserMode.active) {
-      this.generateContextObjectsTestData();
-      return;
+      //browser mode: test data for every priority at once
+      if (pPriority == 1) this.generateContextObjectsTestData();
+    } else if (pPriority == 1) {
+      await this.loadContextObjects_accounts();
+      await this.loadContextObjects_media();
+    } else if (pPriority == 2) {
+      await this.loadContextObjects_relatedCLM();
+      await this.loadContextObjects_emailHistoryIds();
+    } else if (pPriority == 3) {
+      await this.loadContextObjects_approvedDocuments();
     }
 
-    //used for developing/debugging, will disable cache even if available
-    const forceDisabledCache = false;
+    this.contextObjects.setLoaded(pPriority);
+    util.dispatchEvent("konaContextObjects", { priority: pPriority });
+  },
 
-    return new Promise((resolve) => {
-      (async () => {
-        /*get account(s) metadata ------------------------------------------------------------------------*/
-        {
-          //check if data was already cached in session data, otherwise query
-          if (
-            ((this.vars.session.isAnActualCall && sessionData.metadata.call.cached) ||
-              (!this.vars.session.isAnActualCall && sessionData.metadata.accounts.cached)) &&
-            !forceDisabledCache
-          ) {
-            //data was cached in session data >> use it
-            if (this.vars.session.isAnActualCall) {
-              this.vars.metadata.account = JSON.parse(JSON.stringify(sessionData.metadata.call.account));
-            } else {
-              this.vars.metadata.allAccounts = JSON.parse(JSON.stringify(sessionData.metadata.accounts.allAccounts));
-            }
+  //priority 1
+  loadContextObjects_accounts: async function () {
+    let sessionData = this.sessionData;
+    let detailedLog = this.vars.options.debugMode.detailedLog;
+    const forceDisabledCache = this.contextObjects.forceDisabledCache;
 
-            if (detailedLog) util.log("clm.getDataForContextObjects() >> using cached account data");
+    /*get account(s) metadata ------------------------------------------------------------------------*/
+    {
+      //check if data was already cached in session data, otherwise query
+      if (
+        ((this.vars.session.isAnActualCall && sessionData.metadata.call.cached) ||
+          (!this.vars.session.isAnActualCall && sessionData.metadata.accounts.cached)) &&
+        !forceDisabledCache
+      ) {
+        //data was cached in session data >> use it
+        if (this.vars.session.isAnActualCall) {
+          this.vars.metadata.account = JSON.parse(JSON.stringify(sessionData.metadata.call.account));
+        } else {
+          this.vars.metadata.allAccounts = JSON.parse(JSON.stringify(sessionData.metadata.accounts.allAccounts));
+        }
+
+        if (detailedLog) util.log("clm.loadContextObjects(1) >> using cached account data");
+      } else {
+        //data not cached >> query
+
+        //a failed query leaves the data uncached so the next slide retries
+        let queryFailed = false;
+
+        //if an actual call, obtain current account id first
+        if (this.vars.session.isAnActualCall) {
+          let current = await crm.getCurrent("account", "id");
+          if (current && current.id) {
+            this.vars.metadata.account.id = current.id;
           } else {
-            //data not cached >> query
+            queryFailed = true;
+          }
+        }
 
-            //a failed query leaves the data uncached so the next slide retries
-            let queryFailed = false;
+        //query current account  (if actual call) or all accounts (if media)
+        let accountConditions = this.vars.metadata.account.id ? [{ field: "id", value: this.vars.metadata.account.id }] : [];
+        let accountResult = await crm.query("account", ["id", "name", "salutation", "typeId"], accountConditions);
+        if (!accountResult.success) queryFailed = true;
+        let accountRecords = accountResult.records;
 
-            //if an actual call, obtain current account id first
-            if (this.vars.session.isAnActualCall) {
-              let current = await crm.getCurrent("account", "id");
-              if (current && current.id) {
-                this.vars.metadata.account.id = current.id;
-              } else {
-                queryFailed = true;
+        //query account types of the retrieved account(s)
+        let typeIds = [...new Set(accountRecords.map((account) => account.typeId).filter((id) => id))];
+        let typeConditions = [{ field: "objectName", value: "account" }];
+        if (typeIds.length > 0) typeConditions.push({ field: "id", value: typeIds });
+        let typeResult = await crm.query("accountType", ["id", "name", "key"], typeConditions);
+        if (!typeResult.success) queryFailed = true;
+
+        //map account type label and key to account(s)
+        accountRecords.forEach((account) => {
+          let accountType = typeResult.records.find((type) => type.id == account.typeId);
+          account.recordTypeName = accountType ? accountType.name : null;
+          account.type = accountType ? accountType.key : null;
+        });
+
+        //store in vars and session data
+        if (this.vars.session.isAnActualCall) {
+          //current account (call mode only)
+          let currentAccount = accountRecords.find((account) => {
+            return account.id == this.vars.metadata.account.id;
+          });
+          if (currentAccount) {
+            this.vars.metadata.account.name = currentAccount.name;
+            this.vars.metadata.account.salutation = currentAccount.salutation;
+            this.vars.metadata.account.recordTypeName = currentAccount.recordTypeName;
+            this.vars.metadata.account.type = currentAccount.type;
+          }
+
+          sessionData.metadata.call.account = JSON.parse(JSON.stringify(this.vars.metadata.account));
+          sessionData.metadata.call.cached = !queryFailed;
+        } else {
+          //all accounts (media mode only)
+          let accountRecordTemplate = this.vars.metadata.allAccounts.splice(0)[0];
+          accountRecords.forEach((accountRecord) => {
+            let newAccountRecord = JSON.parse(JSON.stringify(accountRecordTemplate));
+            newAccountRecord.id = accountRecord.id;
+            newAccountRecord.name = accountRecord.name;
+            newAccountRecord.salutation = accountRecord.salutation;
+            newAccountRecord.recordTypeName = accountRecord.recordTypeName;
+            newAccountRecord.type = accountRecord.type;
+            this.vars.metadata.allAccounts.push(newAccountRecord);
+          });
+
+          sessionData.metadata.accounts.allAccounts = JSON.parse(JSON.stringify(this.vars.metadata.allAccounts));
+          sessionData.metadata.accounts.cached = !queryFailed;
+        }
+
+        storage.sessionData.update()
+
+        if (detailedLog) util.log("clm.loadContextObjects(1) >> read account(s)");
+      }
+    }
+  },
+  loadContextObjects_media: async function () {
+    let sessionData = this.sessionData;
+    let detailedLog = this.vars.options.debugMode.detailedLog;
+    const forceDisabledCache = this.contextObjects.forceDisabledCache;
+
+    /*get media-related metadata (presentation, key message) -----------------------------------------*/
+    {
+      //the presentation is the same for the whole session; the key message is the current slide's, so it is cached per slide
+      let media = sessionData.metadata.media;
+      if (!media.keyMessages) media.keyMessages = {}; //session stored before key messages were cached per slide
+      let slideId = this.vars.navigation.currentSlide.id;
+
+      if (media.cached && !forceDisabledCache) {
+        this.vars.metadata.presentation = JSON.parse(JSON.stringify(media.presentation));
+        if (detailedLog) util.log("clm.loadContextObjects(1) >> using cached presentation data");
+      } else {
+        //presentation (id, name, status, Vault doc id, version)
+        let presentation = await crm.getCurrent("presentation", ["id", "name", "status", "vaultDocId", "version"]);
+        if (presentation) {
+          this.vars.metadata.presentation.id = presentation.id;
+          this.vars.metadata.presentation.name = presentation.name;
+          this.vars.metadata.presentation.status = presentation.status;
+          this.vars.metadata.presentation.vaultDocID = presentation.vaultDocId;
+          this.vars.metadata.presentation.version = presentation.version;
+        }
+        if (detailedLog) util.log("clm.loadContextObjects(1) >> read presentation");
+
+        media.presentation = JSON.parse(JSON.stringify(this.vars.metadata.presentation));
+        media.cached = true;
+        storage.sessionData.update();
+      }
+
+      if (media.keyMessages[slideId] && !forceDisabledCache) {
+        this.vars.metadata.keyMessage = JSON.parse(JSON.stringify(media.keyMessages[slideId]));
+        if (detailedLog) util.log("clm.loadContextObjects(1) >> using cached key message data");
+      } else {
+        //key message (id, file name, disable actions, iOS resolution, Vault doc id, status, slide version)
+        let keyMessage = await crm.getCurrent("keyMessage", ["id", "mediaFileName", "disableActions", "iosResolution", "vaultDocId", "status", "slideVersion"]);
+        if (keyMessage) {
+          this.vars.metadata.keyMessage.id = keyMessage.id;
+          this.vars.metadata.keyMessage.mediaFileName = keyMessage.mediaFileName;
+          this.vars.metadata.keyMessage.disableActions = keyMessage.disableActions;
+          this.vars.metadata.keyMessage.iOSResolution = keyMessage.iosResolution;
+          this.vars.metadata.keyMessage.vaultDocID = keyMessage.vaultDocId;
+          this.vars.metadata.keyMessage.status = keyMessage.status;
+          this.vars.metadata.keyMessage.slideVersion = keyMessage.slideVersion;
+        }
+        if (detailedLog) util.log("clm.loadContextObjects(1) >> read key message");
+
+        media.keyMessages[slideId] = JSON.parse(JSON.stringify(this.vars.metadata.keyMessage));
+        storage.sessionData.update();
+      }
+
+      util.log(
+        `This presentation: ${this.vars.metadata.presentation.vaultDocID} (${this.vars.metadata.presentation.version}) - ${this.vars.metadata.presentation.status}`,
+      );
+      util.log(
+        `This key message: ${this.vars.metadata.keyMessage.vaultDocID} (${this.vars.metadata.keyMessage.slideVersion}) - ${this.vars.metadata.keyMessage.status}`,
+      );
+    }
+  },
+
+  //priority 2
+  loadContextObjects_relatedCLM: async function () {
+    let sessionData = this.sessionData;
+    let detailedLog = this.vars.options.debugMode.detailedLog;
+    const forceDisabledCache = this.contextObjects.forceDisabledCache;
+
+    /*check if related CLM links are available -------------------------------------------------------*/
+    if (this.vars.relatedCLMV2.active && this.vars.relatedCLMV2.items.length > 0) {
+      if (sessionData.relatedCLMV2.cached && !forceDisabledCache) {
+        for (let relatedItem of this.vars.relatedCLMV2.items) {
+          //look for item in session data
+          let sessionItem = sessionData.relatedCLMV2.items.find((sessionItem) => {
+            return sessionItem.id == relatedItem.id;
+          });
+          //assign available flag from session data
+          if (sessionItem) {
+            relatedItem.available = sessionItem.available;
+          } else {
+            util.log(`clm.loadContextObjects(2): related CLM / no approved or staged records found for ${relatedItem.id}`, "error");
+          }
+        }
+        if (detailedLog) util.log("clm.loadContextObjects(2) >> using cached related CLM data");
+      } else {
+        let needToUpdateSessionData = false;
+        for (let relatedItem of this.vars.relatedCLMV2.items) {
+          let idsToCheck = [
+            { type: "Presentation", vaultId: relatedItem.vaultExternalID.presentation, available: null },
+            { type: "Key Message", vaultId: relatedItem.vaultExternalID.keyMessage, available: null },
+          ];
+          for (let thisId of idsToCheck) {
+            let result = await crm.query(thisId.type == "Presentation" ? "presentation" : "keyMessage", ["id", "name", "status"], [
+              { field: "vaultExternalId", value: thisId.vaultId },
+            ]);
+            if (result.success) {
+              let foundApproved = result.records.find((item) => item.status == "approved");
+              let foundStaged = result.records.find((item) => item.status == "staged");
+              if (!foundApproved && !foundStaged) {
+                util.log(`clm.loadContextObjects(2): related CLM ${relatedItem.id} / no approved or staged record found for ${thisId.type} ${thisId.vaultId}`, "error");
               }
+              if (foundStaged && !foundApproved) {
+                util.log(`clm.loadContextObjects(2): related CLM ${relatedItem.id} / no approved (just staged) record found for ${thisId.type} ${thisId.vaultId}`, "error");
+              }
+              if (foundApproved || foundStaged) {
+                //partial: mark presentation or key message as available
+                thisId.available = true;
+              }
+            } else {
+              util.log(`clm.loadContextObjects(2): failed to retrieve ${thisId.type} ${thisId.vaultId}: ${result.message}`, "error");
             }
+          }
+          if (idsToCheck[0].available && idsToCheck[1].available) {
+            //mark related item as available (both presentation and key message are available)
+            relatedItem.available = true;
 
-            //query current account  (if actual call) or all accounts (if media)
-            let accountConditions = this.vars.metadata.account.id ? [{ field: "id", value: this.vars.metadata.account.id }] : [];
-            let accountResult = await crm.query("account", ["id", "name", "salutation", "typeId"], accountConditions);
-            if (!accountResult.success) queryFailed = true;
-            let accountRecords = accountResult.records;
-
-            //query account types of the retrieved account(s)
-            let typeIds = [...new Set(accountRecords.map((account) => account.typeId).filter((id) => id))];
-            let typeConditions = [{ field: "objectName", value: "account" }];
-            if (typeIds.length > 0) typeConditions.push({ field: "id", value: typeIds });
-            let typeResult = await crm.query("accountType", ["id", "name", "key"], typeConditions);
-            if (!typeResult.success) queryFailed = true;
-
-            //map account type label and key to account(s)
-            accountRecords.forEach((account) => {
-              let accountType = typeResult.records.find((type) => type.id == account.typeId);
-              account.recordTypeName = accountType ? accountType.name : null;
-              account.type = accountType ? accountType.key : null;
+            //store in session data
+            sessionData.relatedCLMV2.items.push({
+              id: relatedItem.id,
+              available: true,
             });
 
-            //store in vars and session data
-            if (this.vars.session.isAnActualCall) {
-              //current account (call mode only)
-              let currentAccount = accountRecords.find((account) => {
-                return account.id == this.vars.metadata.account.id;
-              });
-              if (currentAccount) {
-                this.vars.metadata.account.name = currentAccount.name;
-                this.vars.metadata.account.salutation = currentAccount.salutation;
-                this.vars.metadata.account.recordTypeName = currentAccount.recordTypeName;
-                this.vars.metadata.account.type = currentAccount.type;
-              }
-
-              sessionData.metadata.call.account = JSON.parse(JSON.stringify(this.vars.metadata.account));
-              sessionData.metadata.call.cached = !queryFailed;
-            } else {
-              //all accounts (media mode only)
-              let accountRecordTemplate = this.vars.metadata.allAccounts.splice(0)[0];
-              accountRecords.forEach((accountRecord) => {
-                let newAccountRecord = JSON.parse(JSON.stringify(accountRecordTemplate));
-                newAccountRecord.id = accountRecord.id;
-                newAccountRecord.name = accountRecord.name;
-                newAccountRecord.salutation = accountRecord.salutation;
-                newAccountRecord.recordTypeName = accountRecord.recordTypeName;
-                newAccountRecord.type = accountRecord.type;
-                this.vars.metadata.allAccounts.push(newAccountRecord);
-              });
-
-              sessionData.metadata.accounts.allAccounts = JSON.parse(JSON.stringify(this.vars.metadata.allAccounts));
-              sessionData.metadata.accounts.cached = !queryFailed;
-            }
-
-            storage.sessionData.update()
-
-            if (detailedLog) util.log("clm.getDataForContextObjects() >> read account(s)");
+            //flag to update session data
+            needToUpdateSessionData = true;
           }
         }
-
-        /*get media-related metadata (presentation, key message) -----------------------------------------*/
-        {
-          //the presentation is the same for the whole session; the key message is the current slide's, so it is cached per slide
-          let media = sessionData.metadata.media;
-          if (!media.keyMessages) media.keyMessages = {}; //session stored before key messages were cached per slide
-          let slideId = this.vars.navigation.currentSlide.id;
-
-          if (media.cached && !forceDisabledCache) {
-            this.vars.metadata.presentation = JSON.parse(JSON.stringify(media.presentation));
-            if (detailedLog) util.log("clm.getDataForContextObjects() >> using cached presentation data");
-          } else {
-            //presentation (id, name, status, Vault doc id, version)
-            let presentation = await crm.getCurrent("presentation", ["id", "name", "status", "vaultDocId", "version"]);
-            if (presentation) {
-              this.vars.metadata.presentation.id = presentation.id;
-              this.vars.metadata.presentation.name = presentation.name;
-              this.vars.metadata.presentation.status = presentation.status;
-              this.vars.metadata.presentation.vaultDocID = presentation.vaultDocId;
-              this.vars.metadata.presentation.version = presentation.version;
-            }
-            if (detailedLog) util.log("clm.getDataForContextObjects() >> read presentation");
-
-            media.presentation = JSON.parse(JSON.stringify(this.vars.metadata.presentation));
-            media.cached = true;
-            storage.sessionData.update();
-          }
-
-          if (media.keyMessages[slideId] && !forceDisabledCache) {
-            this.vars.metadata.keyMessage = JSON.parse(JSON.stringify(media.keyMessages[slideId]));
-            if (detailedLog) util.log("clm.getDataForContextObjects() >> using cached key message data");
-          } else {
-            //key message (id, file name, disable actions, iOS resolution, Vault doc id, status, slide version)
-            let keyMessage = await crm.getCurrent("keyMessage", ["id", "mediaFileName", "disableActions", "iosResolution", "vaultDocId", "status", "slideVersion"]);
-            if (keyMessage) {
-              this.vars.metadata.keyMessage.id = keyMessage.id;
-              this.vars.metadata.keyMessage.mediaFileName = keyMessage.mediaFileName;
-              this.vars.metadata.keyMessage.disableActions = keyMessage.disableActions;
-              this.vars.metadata.keyMessage.iOSResolution = keyMessage.iosResolution;
-              this.vars.metadata.keyMessage.vaultDocID = keyMessage.vaultDocId;
-              this.vars.metadata.keyMessage.status = keyMessage.status;
-              this.vars.metadata.keyMessage.slideVersion = keyMessage.slideVersion;
-            }
-            if (detailedLog) util.log("clm.getDataForContextObjects() >> read key message");
-
-            media.keyMessages[slideId] = JSON.parse(JSON.stringify(this.vars.metadata.keyMessage));
-            storage.sessionData.update();
-          }
-
-          util.log(
-            `This presentation: ${this.vars.metadata.presentation.vaultDocID} (${this.vars.metadata.presentation.version}) - ${this.vars.metadata.presentation.status}`,
-          );
-          util.log(
-            `This key message: ${this.vars.metadata.keyMessage.vaultDocID} (${this.vars.metadata.keyMessage.slideVersion}) - ${this.vars.metadata.keyMessage.status}`,
-          );
+        if (needToUpdateSessionData) {
+          sessionData.relatedCLMV2.cached = true;
+          storage.sessionData.update()
+          if (detailedLog) util.log("clm.loadContextObjects(2) >> read related CLM");
         }
+      }
+    }
+  },
+  //email cart, interaction summary (non email cart) and rteBuilder templates and fragments with a Vault Doc ID
+  approvedDocumentItems: function () {
+    let itemsArray = []; //{ id: "", vaultId: "", group: "", __this: {}}
 
-        /*get CRM IDs for approved email documents -------------------------------------------------------*/
-        {
-          //approved documents for email cart and non email cart (get crmID for templates and fragments)
-          if (this.vars.emailCart.active || this.vars.rteBuilder.active) {
-            //array of items: emailCart templates and fragments / non emailCart (interactionSummary) templates and fragments
-            let itemsArray = []; //{ id: "", vaultId: "", group: "", __this: {}}
-
-            //map email cart templates and fragments
-            {
-              if (this.vars.emailCart.active) {
-                this.vars.emailCart.templates
-                  .map((item) => {
-                    return {
-                      id: item.id,
-                      vaultId: item.vaultId,
-                      group: "templates",
-                      __this: item, //reference to original item
-                    };
-                  })
-                  .forEach((item) => {
-                    if (item.vaultId) {
-                      itemsArray.push(item);
-                    } else {
-                      util.log(`clm.getDataForContextObjects: missing Vault Doc ID for emailCart template ${item.id}`, "error");
-                    }
-                  });
-                this.vars.emailCart.fragments
-                  .map((item) => {
-                    return {
-                      id: item.id,
-                      vaultId: item.vaultId,
-                      group: "fragments",
-                      __this: item, //reference to original item
-                    };
-                  })
-                  .forEach((item) => {
-                    if (item.vaultId) {
-                      itemsArray.push(item);
-                    } else {
-                      util.log(`clm.getDataForContextObjects: missing Vault Doc ID for emailCart fragment ${item.id}`, "error");
-                    }
-                  });
-              }
-
-              //map interaction summary non email cart templates and fragments
-              if (interactionSummary.active) {
-                interactionSummary.nonEmailCartItems.templates.forEach((template) => {
-                  if (template.vaultId) {
-                    itemsArray.push({
-                      id: template.id,
-                      vaultId: template.vaultId,
-                      group: "nonEmailCartTemplates",
-                      __this: template, //reference to original item
-                    });
-
-                    template.fragments.forEach((fragment) => {
-                      if (fragment.vaultId) {
-                        itemsArray.push({
-                          id: fragment.id,
-                          vaultId: fragment.vaultId,
-                          group: "nonEmailCartFragments",
-                          template: template.id,
-                          __this: fragment, //reference to original item
-                        });
-                      } else {
-                        util.log(`clm.getDataForContextObjects: missing Vault Doc ID for interactionSummary fragment ${fragment.id}`, "error");
-                      }
-                    });
-                  } else {
-                    util.log(`clm.getDataForContextObjects: missing Vault Doc ID for interactionSummary template ${template.id}`, "error");
-                  }
-                });
-              }
-            }
-
-            //map rteBuilder templates and fragments
-            if (this.vars.rteBuilder.active) {
-              this.vars.rteBuilder.templates
-                .map((item) => {
-                  return {
-                    id: item.id,
-                    vaultId: item.vaultId,
-                    group: "rteBuilderTemplates",
-                    __this: item,
-                  };
-                })
-                .forEach((item) => {
-                  if (item.vaultId) {
-                    itemsArray.push(item);
-                  } else {
-                    util.log(`clm.getDataForContextObjects: missing Vault Doc ID for rteBuilder template ${item.id}`, "error");
-                  }
-                });
-              this.vars.rteBuilder.fragments
-                .map((item) => {
-                  return {
-                    id: item.id,
-                    vaultId: item.vaultId,
-                    group: "rteBuilderFragments",
-                    __this: item,
-                  };
-                })
-                .forEach((item) => {
-                  if (item.vaultId) {
-                    itemsArray.push(item);
-                  } else {
-                    util.log(`clm.getDataForContextObjects: missing Vault Doc ID for rteBuilder fragment ${item.id}`, "error");
-                  }
-                });
-
-              //map rteBuilder customization items (banners, salutations, openings, closings)
-              this.vars.rteBuilder.templates
-                .filter((t) => t.customization)
-                .forEach((t) => {
-                  const addCustomizationItems = (arr, group) => {
-                    arr.forEach((item) => {
-                      if (item.vaultId) {
-                        itemsArray.push({ id: item.id, vaultId: item.vaultId, group, __this: item });
-                      } else {
-                        util.log(`clm.getDataForContextObjects: missing Vault Doc ID for ${group} ${item.id}`, "error");
-                      }
-                    });
-                  };
-                  addCustomizationItems(t.customization.banners,     "rteBuilderBanners");
-                  addCustomizationItems(t.customization.salutations,  "rteBuilderSalutations");
-                  addCustomizationItems(t.customization.openings,     "rteBuilderOpenings");
-                  addCustomizationItems(t.customization.closings,     "rteBuilderClosings");
-                });
-            }
-
-            //getApprovedDocument for each item
-            if (sessionData.approvedDocuments.cached && !forceDisabledCache) {
-              for (let item of itemsArray) {
-                //look for item in session data
-                let sessionItem = sessionData.approvedDocuments.items.find((sessionItem) => {
-                  return sessionItem.group == item.group && sessionItem.id == item.id;
-                });
-                //assign crmId and available flag from session data (failed lookups are cached with crmId null)
-                if (sessionItem && sessionItem.crmId) {
-                  item.__this.crmId = sessionItem.crmId; //set crmId
-                  item.__this.available = true; //set available flag
-                }
-              }
-              if (detailedLog) util.log("clm.getDataForContextObjects() >> using cached crmID data");
-            } else {
-              //each failed lookup shows a native alert in Vault CRM: look up once per session, caching failures too
-              for (let item of itemsArray) {
-                const vaultURL = item.group.startsWith("rteBuilder") ? this.vars.rteBuilder.vaultURL : this.vars.emailCart.vaultURL;
-                let crmId = await crm.approvedDocumentId(vaultURL, item.vaultId);
-
-                sessionData.approvedDocuments.items.push({
-                  group: item.group,
-                  id: item.id,
-                  vaultId: item.vaultId,
-                  crmId: crmId,
-                }); //store in session data
-
-                if (crmId) {
-                  let thisItem = item.__this; //reference to original item
-                  thisItem.crmId = crmId; //set crmId
-                  thisItem.available = true; //set available flag
-                } else {
-                  util.log(`clm.getDataForContextObjects: could not retrieve CRM ID for ${item.id} (${item.group}): ${item.vaultId} + ${vaultURL}`, "error");
-                }
-              }
-              sessionData.approvedDocuments.cached = true;
-              storage.sessionData.update()
-              if (detailedLog) util.log("clm.getDataForContextObjects() >> read crmIDs");
-            }
-          }
-        }
-
-        /*check if related CLM links are available -------------------------------------------------------*/
-        if (this.vars.relatedCLMV2.active && this.vars.relatedCLMV2.items.length > 0) {
-          if (sessionData.relatedCLMV2.cached && !forceDisabledCache) {
-            for (let relatedItem of this.vars.relatedCLMV2.items) {
-              //look for item in session data
-              let sessionItem = sessionData.relatedCLMV2.items.find((sessionItem) => {
-                return sessionItem.id == relatedItem.id;
-              });
-              //assign available flag from session data
-              if (sessionItem) {
-                relatedItem.available = sessionItem.available;
+    if (this.vars.emailCart.active || this.vars.rteBuilder.active) {
+      //map email cart templates and fragments
+      {
+        if (this.vars.emailCart.active) {
+          this.vars.emailCart.templates
+            .map((item) => {
+              return {
+                id: item.id,
+                vaultId: item.vaultId,
+                group: "templates",
+                __this: item, //reference to original item
+              };
+            })
+            .forEach((item) => {
+              if (item.vaultId) {
+                itemsArray.push(item);
               } else {
-                util.log(`clm.getDataForContextObjects: related CLM / no approved or staged records found for ${relatedItem.id}`, "error");
+                util.log(`clm.loadContextObjects(2): missing Vault Doc ID for emailCart template ${item.id}`, "error");
               }
-            }
-            if (detailedLog) util.log("clm.getDataForContextObjects() >> using cached related CLM data");
-          } else {
-            let needToUpdateSessionData = false;
-            for (let relatedItem of this.vars.relatedCLMV2.items) {
-              let idsToCheck = [
-                { type: "Presentation", vaultId: relatedItem.vaultExternalID.presentation, available: null },
-                { type: "Key Message", vaultId: relatedItem.vaultExternalID.keyMessage, available: null },
-              ];
-              for (let thisId of idsToCheck) {
-                let result = await crm.query(thisId.type == "Presentation" ? "presentation" : "keyMessage", ["id", "name", "status"], [
-                  { field: "vaultExternalId", value: thisId.vaultId },
-                ]);
-                if (result.success) {
-                  let foundApproved = result.records.find((item) => item.status == "approved");
-                  let foundStaged = result.records.find((item) => item.status == "staged");
-                  if (!foundApproved && !foundStaged) {
-                    util.log(`clm.getDataForContextObjects: related CLM ${relatedItem.id} / no approved or staged record found for ${thisId.type} ${thisId.vaultId}`, "error");
-                  }
-                  if (foundStaged && !foundApproved) {
-                    util.log(`clm.getDataForContextObjects: related CLM ${relatedItem.id} / no approved (just staged) record found for ${thisId.type} ${thisId.vaultId}`, "error");
-                  }
-                  if (foundApproved || foundStaged) {
-                    //partial: mark presentation or key message as available
-                    thisId.available = true;
-                  }
-                } else {
-                  util.log(`clm.getDataForContextObjects: failed to retrieve ${thisId.type} ${thisId.vaultId}: ${result.message}`, "error");
-                }
+            });
+          this.vars.emailCart.fragments
+            .map((item) => {
+              return {
+                id: item.id,
+                vaultId: item.vaultId,
+                group: "fragments",
+                __this: item, //reference to original item
+              };
+            })
+            .forEach((item) => {
+              if (item.vaultId) {
+                itemsArray.push(item);
+              } else {
+                util.log(`clm.loadContextObjects(2): missing Vault Doc ID for emailCart fragment ${item.id}`, "error");
               }
-              if (idsToCheck[0].available && idsToCheck[1].available) {
-                //mark related item as available (both presentation and key message are available)
-                relatedItem.available = true;
-
-                //store in session data
-                sessionData.relatedCLMV2.items.push({
-                  id: relatedItem.id,
-                  available: true,
-                });
-
-                //flag to update session data
-                needToUpdateSessionData = true;
-              }
-            }
-            if (needToUpdateSessionData) {
-              sessionData.relatedCLMV2.cached = true;
-              storage.sessionData.update()
-              if (detailedLog) util.log("clm.getDataForContextObjects() >> read related CLM");
-            }
-          }
+            });
         }
 
-        resolve();
-      })();
+        //map interaction summary non email cart templates and fragments
+        if (interactionSummary.active) {
+          interactionSummary.nonEmailCartItems.templates.forEach((template) => {
+            if (template.vaultId) {
+              itemsArray.push({
+                id: template.id,
+                vaultId: template.vaultId,
+                group: "nonEmailCartTemplates",
+                __this: template, //reference to original item
+              });
+
+              template.fragments.forEach((fragment) => {
+                if (fragment.vaultId) {
+                  itemsArray.push({
+                    id: fragment.id,
+                    vaultId: fragment.vaultId,
+                    group: "nonEmailCartFragments",
+                    template: template.id,
+                    __this: fragment, //reference to original item
+                  });
+                } else {
+                  util.log(`clm.loadContextObjects(2): missing Vault Doc ID for interactionSummary fragment ${fragment.id}`, "error");
+                }
+              });
+            } else {
+              util.log(`clm.loadContextObjects(2): missing Vault Doc ID for interactionSummary template ${template.id}`, "error");
+            }
+          });
+        }
+      }
+
+      //map rteBuilder templates and fragments
+      if (this.vars.rteBuilder.active) {
+        this.vars.rteBuilder.templates
+          .map((item) => {
+            return {
+              id: item.id,
+              vaultId: item.vaultId,
+              group: "rteBuilderTemplates",
+              __this: item,
+            };
+          })
+          .forEach((item) => {
+            if (item.vaultId) {
+              itemsArray.push(item);
+            } else {
+              util.log(`clm.loadContextObjects(2): missing Vault Doc ID for rteBuilder template ${item.id}`, "error");
+            }
+          });
+        this.vars.rteBuilder.fragments
+          .map((item) => {
+            return {
+              id: item.id,
+              vaultId: item.vaultId,
+              group: "rteBuilderFragments",
+              __this: item,
+            };
+          })
+          .forEach((item) => {
+            if (item.vaultId) {
+              itemsArray.push(item);
+            } else {
+              util.log(`clm.loadContextObjects(2): missing Vault Doc ID for rteBuilder fragment ${item.id}`, "error");
+            }
+          });
+
+        //map rteBuilder customization items (banners, salutations, openings, closings)
+        this.vars.rteBuilder.templates
+          .filter((t) => t.customization)
+          .forEach((t) => {
+            const addCustomizationItems = (arr, group) => {
+              arr.forEach((item) => {
+                if (item.vaultId) {
+                  itemsArray.push({ id: item.id, vaultId: item.vaultId, group, __this: item });
+                } else {
+                  util.log(`clm.loadContextObjects(2): missing Vault Doc ID for ${group} ${item.id}`, "error");
+                }
+              });
+            };
+            addCustomizationItems(t.customization.banners,     "rteBuilderBanners");
+            addCustomizationItems(t.customization.salutations,  "rteBuilderSalutations");
+            addCustomizationItems(t.customization.openings,     "rteBuilderOpenings");
+            addCustomizationItems(t.customization.closings,     "rteBuilderClosings");
+          });
+      }
+    }
+
+    return itemsArray;
+  },
+  approvedDocumentVaultURL: function (pItem) {
+    return pItem.group.startsWith("rteBuilder") ? this.vars.rteBuilder.vaultURL : this.vars.emailCart.vaultURL;
+  },
+  loadContextObjects_emailHistoryIds: async function () {
+    let sessionData = this.sessionData;
+    let detailedLog = this.vars.options.debugMode.detailedLog;
+    const forceDisabledCache = this.contextObjects.forceDisabledCache;
+
+    let itemsArray = this.approvedDocumentItems();
+    this.contextObjects.approvedDocumentItems = itemsArray;
+
+    //items already looked up this session (priority 3): crmId and available flag from session data
+    let pendingItems = [];
+    itemsArray.forEach((item) => {
+      let sessionItem = forceDisabledCache
+        ? null
+        : sessionData.approvedDocuments.items.find((sessionItem) => {
+            return sessionItem.group == item.group && sessionItem.id == item.id;
+          });
+      if (!sessionItem) {
+        pendingItems.push(item);
+      } else if (sessionItem.crmId) {
+        //failed lookups are cached with crmId null
+        item.__this.crmId = sessionItem.crmId;
+        item.__this.available = true;
+      }
     });
+    if (detailedLog && itemsArray.length > pendingItems.length) util.log("clm.loadContextObjects(2) >> using cached crmID data");
+    if (pendingItems.length == 0) return;
+
+    //the rest: one query for the approved records of their Vault documents, for the interaction summary history only.
+    //getApprovedDocument (priority 3) also checks the rep's products, so only its id (crmId) is used to send.
+    const normalizeURL = (pURL) => String(pURL || "").toLowerCase().replace(/^https?:\/\//, "").replace(/\/+$/, "");
+    let vaultDocumentIds = [...new Set(pendingItems.map((item) => String(item.vaultId)))];
+    let result = await crm.query("approvedDocument", ["id", "vaultDocumentId", "vaultInstanceId"], [
+      { field: "vaultDocumentId", value: vaultDocumentIds },
+      { field: "status", value: "approved" },
+    ]);
+    if (!result.success) {
+      util.log(`clm.loadContextObjects(2): failed to retrieve approved documents for history ${result.message}`, "error");
+      return;
+    }
+    pendingItems.forEach((item) => {
+      const vaultURL = normalizeURL(this.approvedDocumentVaultURL(item));
+      let record = result.records.find((record) => {
+        return String(record.vaultDocumentId) == String(item.vaultId) && (!record.vaultInstanceId || normalizeURL(record.vaultInstanceId) == vaultURL);
+      });
+      if (record) item.__this.historyCrmId = record.id;
+    });
+    if (detailedLog) util.log("clm.loadContextObjects(2) >> read approved documents for history");
+  },
+
+  //priority 3
+  loadContextObjects_approvedDocuments: async function () {
+    let sessionData = this.sessionData;
+    let detailedLog = this.vars.options.debugMode.detailedLog;
+    const forceDisabledCache = this.contextObjects.forceDisabledCache;
+
+    let itemsArray = this.contextObjects.approvedDocumentItems || [];
+    let pendingItems = itemsArray.filter((item) => {
+      if (forceDisabledCache) return true;
+      return !sessionData.approvedDocuments.items.find((sessionItem) => {
+        return sessionItem.group == item.group && sessionItem.id == item.id;
+      });
+    });
+
+    //each failed lookup shows a native alert in Vault CRM: look up once per session, caching failures too.
+    //each result is stored at once, so a slide change before the end resumes from the next item
+    for (let item of pendingItems) {
+      //crm runs library calls one at a time: let an interaction summary model being built (AI orb) go first
+      while (interactionSummary.output.processing) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+
+      const vaultURL = this.approvedDocumentVaultURL(item);
+      let crmId = await crm.approvedDocumentId(vaultURL, item.vaultId);
+
+      sessionData.approvedDocuments.items.push({
+        group: item.group,
+        id: item.id,
+        vaultId: item.vaultId,
+        crmId: crmId,
+      }); //store in session data
+      storage.sessionData.update();
+
+      if (crmId) {
+        let thisItem = item.__this; //reference to original item
+        thisItem.crmId = crmId; //set crmId
+        thisItem.available = true; //set available flag
+        if (thisItem.historyCrmId && thisItem.historyCrmId != crmId) {
+          util.log(`clm.loadContextObjects(3): ${item.id} (${item.group}) history id ${thisItem.historyCrmId} differs from approved document ${crmId}`, "warn");
+        }
+      } else {
+        util.log(`clm.loadContextObjects(3): could not retrieve CRM ID for ${item.id} (${item.group}): ${item.vaultId} + ${vaultURL}`, "error");
+      }
+    }
+    sessionData.approvedDocuments.cached = true;
+    storage.sessionData.update();
+    if (detailedLog && pendingItems.length > 0) util.log("clm.loadContextObjects(3) >> read crmIDs");
   },
   generateContextObjectsTestData: function () {
     let vars = this.vars;

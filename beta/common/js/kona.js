@@ -1,6 +1,6 @@
 "use strict";
 
-const BUILD_ID = "kona library __20261124-214628-ckby3q7__";
+const BUILD_ID = "kona library __20261124-225004-y0p9k9n__";
 console.log("%cBuild:", "color:#888", BUILD_ID);
 
 (function (global) {
@@ -220,28 +220,23 @@ const util = {
       }
     }
 
-    //schema related vars: string values
+    //schema related vars. An unresolved token (no active schema, unknown token, no value for the active schema)
+    //is never used as a value: a string setting gets its default, a "{{token}}" string inside an object becomes null.
+    //"" is a value. getSchemaRelatedVar logs once (per token; one line in all when there is no active schema)
+    //string values
     if (pType == "string" && value) {
       if (value.startsWith("{{") && value.endsWith("}}")) {
-        let schemaRelatedValue = util.getSchemaRelatedVar(value);
-        if (schemaRelatedValue !== null) {
-          value = schemaRelatedValue;
-        }
+        value = util.getSchemaRelatedVar(value); //null when unresolved -> default
       }
     }
 
-    //schema related vars: object values
-    if (pType == "object" && value) {
+    //object values: every "{{token}}" string, wherever it is. Not in schemaRelatedVars itself, where the tokens are
+    //the definitions (read before activeSchema is known)
+    if (pType == "object" && value && pKeyChain !== "schemaRelatedVars") {
       let objectAsText = JSON.stringify(value);
-      let tokens = objectAsText.match(/{{(.*?)}}/g); //look for tokens: starting with {{ and ending with }}
-      if (tokens) {
-        tokens.forEach((token) => {
-          let schemaRelatedValue = util.getSchemaRelatedVar(token); //look for schemaRelatedVar
-          //"" is a value (as for string settings); null / undefined keep the token
-          if (schemaRelatedValue !== null && schemaRelatedValue !== undefined) {
-            objectAsText = objectAsText.replace(`"${token}"`, JSON.stringify(schemaRelatedValue)); //replace
-          }
-        });
+      let tokenString = /"\{\{[^"]*?\}\}"/g; //a JSON string that is a whole token
+      if (tokenString.test(objectAsText)) {
+        objectAsText = objectAsText.replace(tokenString, (match) => JSON.stringify(util.getSchemaRelatedVar(match.slice(1, -1))));
         value = JSON.parse(objectAsText);
       }
     }
@@ -249,25 +244,29 @@ const util = {
     return value === null ? pDefault : typeof value === pType ? value : pDefault;
   },
 
+  //value of a "{{token}}" for schemaRelatedVars.activeSchema; null when unresolved (no active schema, token not
+  //found, no value for the active schema), logged once per token per page (once in all without an active schema)
   getSchemaRelatedVar: (pToken) => {
-    let vars = clm.vars;
+    let schemaRelatedVars = clm.vars.schemaRelatedVars || {};
+    let activeSchema = schemaRelatedVars.activeSchema;
+    let unresolved = (pOnceKey, pText, pType) => {
+      let logged = util.getSchemaRelatedVar.logged || (util.getSchemaRelatedVar.logged = {});
+      if (!logged[pOnceKey]) {
+        logged[pOnceKey] = true;
+        util.log(`getSchemaRelatedVar: ${pText}; treated as not set`, pType);
+      }
+      return null;
+    };
 
-    //active schema
-    let activeSchema = vars.schemaRelatedVars.activeSchema;
-    if (!activeSchema) return;
+    //one log for every token when there is no active schema
+    if (!activeSchema) return unresolved("noActiveSchema", `no schemaRelatedVars.activeSchema, ${pToken} and every other token unresolved`, "error");
 
     //find token in schemaRelatedVars
-    let arrItem = vars.schemaRelatedVars.vars.find((item) => {
-      return item.token == pToken;
-    });
+    let arrItem = (schemaRelatedVars.vars || []).find((item) => item.token == pToken);
+    if (!arrItem) return unresolved(pToken, `${pToken} not found in schemaRelatedVars`, "error");
 
-    let schemaRelatedVar = null;
-    if (arrItem) {
-      schemaRelatedVar = arrItem.value[activeSchema];
-    } else {
-      util.log(`getSchemaRelatedVar: ${pToken} not found in schemaRelatedVars`, "error");
-    }
-
+    let schemaRelatedVar = arrItem.value ? arrItem.value[activeSchema] : undefined;
+    if (schemaRelatedVar === null || schemaRelatedVar === undefined) return unresolved(pToken, `${pToken} has no value for schema "${activeSchema}"`, "warn");
     return schemaRelatedVar;
   },
 
@@ -391,7 +390,7 @@ const crm = {
     initialized: false,
     platform: "veeva",
     loggedOnce: {}, //messages logged once per page (unmapped names / values)
-    labelCache: {}, //picklist labels by "object.field"
+    labelCache: {}, //picklist label lookups (promises) by "object.field", failures included
     queue: Promise.resolve(), //serializes library calls (see helpers.call)
     requestQueue: Promise.resolve(), //serializes library requests (see request)
   },
@@ -832,29 +831,48 @@ const crm = {
       return pValue;
     },
 
+    //single quotes work on both platforms and are required for dates on Vault CRM; a value with a single quote
+    //is put in double quotes. Neither platform's where syntax has a documented escape (the libraries pass the
+    //clause through raw), so a value with both kinds of quote can't be written: null
     quote: (pValue) => {
       let text = String(pValue);
-      //single quotes work on both platforms and are required for dates on Vault CRM
-      return text.indexOf("'") === -1 ? `'${text}'` : `"${text}"`;
+      if (text.indexOf("'") === -1) return `'${text}'`;
+      if (text.indexOf('"') === -1) return `"${text}"`;
+      return null;
     },
 
+    //null when a value can't be quoted (see quote)
     renderClause: (pObjectDef, pObject, pClause) => {
       if (pClause.or) {
-        return "(" + pClause.or.map((c) => crm.helpers.renderClause(pObjectDef, pObject, c)).join(" OR ") + ")";
+        let clauses = pClause.or.map((c) => crm.helpers.renderClause(pObjectDef, pObject, c));
+        return clauses.indexOf(null) !== -1 ? null : "(" + clauses.join(" OR ") + ")";
       }
       let fieldDef = crm.helpers.fieldDef(pObjectDef, pObject, pClause.field);
       let op = pClause.op || "=";
       let values = Array.isArray(pClause.value) ? pClause.value : [pClause.value];
-      let parts = values.map((v) => `${fieldDef.name} ${op} ${crm.helpers.quote(crm.helpers.toPlatformValue(fieldDef, pObject, pClause.field, v))}`);
+      let quoted = values.map((v) => crm.helpers.quote(crm.helpers.toPlatformValue(fieldDef, pObject, pClause.field, v)));
+      if (quoted.indexOf(null) !== -1) return null;
+      let parts = quoted.map((q) => `${fieldDef.name} ${op} ${q}`);
       return parts.length > 1 ? "(" + parts.join(" OR ") + ")" : parts[0];
     },
 
     //conditions: [clause, ...] ANDed; clause: { field, op, value } (value array = any of) or { or: [clauses] }
-    //pOptions.quiet: no error log when the clause is over maxWhereLength (measuring before a split)
+    //null when there are no conditions; false when a value contains both ' and " (can't be quoted: the query
+    //is refused rather than sent with a broken clause, or with the condition dropped)
+    //pOptions.quiet: no error log (measuring before a split)
     renderWhere: (pObject, pConditions, pOptions) => {
       if (!pConditions || !pConditions.length) return null;
       let objectDef = crm.helpers.objectDef(pObject);
-      let where = "WHERE " + pConditions.map((c) => crm.helpers.renderClause(objectDef, pObject, c)).join(" AND ");
+      let clauses = pConditions.map((c) => crm.helpers.renderClause(objectDef, pObject, c));
+      let refused = clauses.indexOf(null);
+      if (refused !== -1) {
+        if (!(pOptions && pOptions.quiet)) {
+          let c = pConditions[refused];
+          util.log(`crm.query: ${pObject} condition on "${c.or ? "or group" : c.field}" refused: a value contains both ' and ", which can't be quoted on ${crm.state.platform}`, "error");
+        }
+        return false;
+      }
+      let where = "WHERE " + clauses.join(" AND ");
       if (where.length > crm.constants.maxWhereLength && !(pOptions && pOptions.quiet)) {
         util.log(`crm.query: where clause for ${pObject} is ${where.length} characters (limit about ${crm.constants.maxWhereLength})`, "error");
       }
@@ -942,6 +960,9 @@ const crm = {
       let objectDef = crm.helpers.objectDef(pObject);
       let platformFields = pFields.map((f) => crm.helpers.fieldDef(objectDef, pObject, f).name);
       let where = crm.helpers.renderWhere(pObject, pConditions);
+      if (where === false) {
+        return { success: false, records: [], message: `crm.query: ${pObject} not sent: a condition value contains both ' and "` };
+      }
       let sort = crm.helpers.renderSort(pObject, pSort);
       let data = await crm.helpers.call("queryRecord", [objectDef.name, platformFields, where, sort, pLimit == null ? null : pLimit]);
       if (!data.success) {
@@ -1184,26 +1205,31 @@ const crm = {
     return { success: !!data.success, message: data.message || null, code: data.code };
   },
 
-  //picklistLabels("call", "channel") -> { faceToFace: "In-person", ... } (cached); {} on failure
-  picklistLabels: async function (pObject, pField) {
+  //picklistLabels("call", "channel") -> { faceToFace: "In-person", ... }; {} on failure.
+  //One lookup per object.field per page (crm.init clears the cache): the result is cached, a failure too (logged
+  //once, not retried for every record of a query), and concurrent callers share the pending lookup
+  picklistLabels: function (pObject, pField) {
     let cacheKey = `${pObject}.${pField}`;
     if (this.state.labelCache[cacheKey]) return this.state.labelCache[cacheKey];
-    let objectDef = this.helpers.objectDef(pObject);
-    let fieldDef = this.helpers.fieldDef(objectDef, pObject, pField);
-    let data = await this.helpers.call("getPicklistValueLabels", [objectDef.name, fieldDef.name]);
-    if (!data.success || !data[objectDef.name]) {
-      util.log(`crm.picklistLabels: ${cacheKey} failed: ${data.message}`, "error");
-      return {};
-    }
-    let raw = this.helpers.driver().picklistLabelsMap(data[objectDef.name][fieldDef.name]);
-    let labels = {};
-    for (let value in raw) {
-      //label fields keep platform values as keys (they are replaced by the label, never compared)
-      let key = fieldDef.label ? value : this.helpers.toNeutralValue(fieldDef, pObject, pField, value);
-      labels[key] = raw[value];
-    }
-    this.state.labelCache[cacheKey] = labels;
-    return labels;
+    let lookup = async () => {
+      let objectDef = this.helpers.objectDef(pObject);
+      let fieldDef = this.helpers.fieldDef(objectDef, pObject, pField);
+      let data = await this.helpers.call("getPicklistValueLabels", [objectDef.name, fieldDef.name]);
+      if (!data.success || !data[objectDef.name]) {
+        util.log(`crm.picklistLabels: ${cacheKey} failed: ${data.message} (not retried on this page)`, "error");
+        return {};
+      }
+      let raw = this.helpers.driver().picklistLabelsMap(data[objectDef.name][fieldDef.name]);
+      let labels = {};
+      for (let value in raw) {
+        //label fields keep platform values as keys (they are replaced by the label, never compared)
+        let key = fieldDef.label ? value : this.helpers.toNeutralValue(fieldDef, pObject, pField, value);
+        labels[key] = raw[value];
+      }
+      return labels;
+    };
+    this.state.labelCache[cacheKey] = lookup();
+    return this.state.labelCache[cacheKey];
   },
 
   /* HTTP (external services, e.g. the AI worker) --------*/
@@ -6118,13 +6144,13 @@ const smartNext = {
         : null;
       storage.sessionData.update();
       if (item.variant && !isCurrentPres && item.keyMessage && typeof messenger !== 'undefined' && messenger.api && messenger.api.sendTargeted) {
-        messenger.api.sendTargeted(item.presentation.replace('https://', ''), 'flowVariant', { keyMessage: item.keyMessage, variant: item.variant });
+        messenger.api.sendTargeted(String(item.presentation || '').replace('https://', ''), 'flowVariant', { keyMessage: item.keyMessage, variant: item.variant });
       }
 
       // Helper: send targeted pdfPage message to a different presentation
       const sendPdfPageMessage = function () {
         if (typeof messenger !== 'undefined' && messenger.api && messenger.api.sendTargeted) {
-          const targetVaultId = item.presentation.replace('https://', '');
+          const targetVaultId = String(item.presentation || '').replace('https://', '');
           messenger.api.sendTargeted(targetVaultId, 'pdfPage', { pageNumber: item.pageNumber });
           util.log('[smartNext] navigateToFlowItem: sent targeted pdfPage → ' + targetVaultId + ', page ' + item.pageNumber, 'info');
         }
@@ -6241,8 +6267,7 @@ const ai = {
   //non-streaming chat waits for the whole answer, not the first byte (Vault CRM: 12.7 s for a short answer)
   NON_STREAMING_TIMEOUT_MS: 60000,
 
-  /*flow intent threshold ---------------------------------*/
-  flowIntentThreshold: 40,
+  /*intent thresholds -------------------------------------*/
   accountsIntentThreshold: 40,
   functionalitiesIntentThreshold: 40,
   relatedCLMIntentThreshold: 40,
@@ -6536,6 +6561,18 @@ const ai = {
         const labels = clm.vars.ai.labels;
         const config = clm.vars.ai.config;
 
+        // Get question from input box
+        const inputEl = els.chat.textInput;
+        if (!inputEl) return;
+
+        // Validate question (before any context work: an empty send builds and pushes nothing)
+        const question = inputEl.value.trim();
+        if (!question) {
+          ui.chat.updateStatus(labels.writeQuestionFirst);
+          ui.chat.setLoading(false);
+          return;
+        }
+
         // Refresh context if needed (slide changed or explicitly invalidated)
         if (ai.api.context.shouldRefreshContext()) {
           ai.api.context.buildContext();
@@ -6545,18 +6582,6 @@ const ai = {
         // Update tracking NOW (after determining if refresh was needed, before sending to server)
         const currentSlideId = com.idc.clm.vars.navigation.currentSlide.id;
         ai.state.lastContextSlideId = currentSlideId;
-
-        // Get question from input box
-        const inputEl = els.chat.textInput;
-        if (!inputEl) return;
-
-        // Validate question
-        const question = inputEl.value.trim();
-        if (!question) {
-          ui.chat.updateStatus(labels.writeQuestionFirst);
-          ui.chat.setLoading(false);
-          return;
-        }
 
         // Mark question as used if it's a suggested question
         const suggestedQuestions = clm.vars.ai.suggestedQuestions || [];
@@ -6991,6 +7016,9 @@ const ai = {
 
         // Build AI context
         ai.api.context.buildContext();
+
+        // Update tracking since context was refreshed for account change (as in select())
+        ai.state.lastContextSlideId = com.idc.clm.vars.navigation.currentSlide.id;
 
         // Clear conversation
         ai.api.conversation.clearConversation();
@@ -7540,10 +7568,12 @@ const ai = {
         return r;
       },
       showNonStreamingResponse: function (data, requestId) {
+        // Remove the reasoning spacer (the streaming path removes it on the first delta), so it isn't saved into the session HTML
+        const container = ai.ui.elements.chat.responseContainer;
+        const reasoningEl = container ? container.querySelector('[data-type="com.idc.ai.chat.content.reasoning"][data-reasoning-for="' + requestId + '"]') : null;
+        if (reasoningEl) reasoningEl.remove();
+
         if (data.clarification) {
-          const container = ai.ui.elements.chat.responseContainer;
-          const reasoningEl = container ? container.querySelector('[data-type="com.idc.ai.chat.content.reasoning"][data-reasoning-for="' + requestId + '"]') : null;
-          if (reasoningEl) reasoningEl.remove();
           this.setLoading(false);
           this.updateStatus("");
           this.showClarificationOverlay(data.clarification, requestId);
@@ -7559,7 +7589,6 @@ const ai = {
         const text = data.answer_text || data.answer || JSON.stringify(data) || labels.responseError;
         const relevantSlides = data.relevantSlides || [];
         const relevantFunctionalities = data.relevantFunctionalities || [];
-        const flowIntent = data.flowIntent || 0;
         const relevantAccounts = data.relevantAccounts || [];
         const accountsIntent = data.accountsIntent || 0;
         const functionalitiesIntent = data.functionalitiesIntent || 0;
@@ -7574,7 +7603,7 @@ const ai = {
         //typewrite effect — and complete response once finished
         this.typeText(r, text, ai.TYPEWRITER_SPEED_MS, function() {
           // Finalize response with relevant items and events after typewriter effect is done
-          ai.ui.chat.finalizeResponse(r, relevantSlides, relevantFunctionalities, flowIntent, relevantAccounts, accountsIntent, functionalitiesIntent, relevantRelatedCLM, relatedCLMIntent, relevantTemplate, relevantFragments, emailIntent, relevantFlow, slidesIntent);
+          ai.ui.chat.finalizeResponse(r, relevantSlides, relevantFunctionalities, relevantAccounts, accountsIntent, functionalitiesIntent, relevantRelatedCLM, relatedCLMIntent, relevantTemplate, relevantFragments, emailIntent, relevantFlow, slidesIntent);
         });
 
       },
@@ -7604,7 +7633,6 @@ const ai = {
         // Extract parameters from data
         const relevantSlides = data.relevantSlides || [];
         const relevantFunctionalities = data.relevantFunctionalities || [];
-        const flowIntent = data.flowIntent || 0;
         const relevantAccounts = data.relevantAccounts || [];
         const accountsIntent = data.accountsIntent || 0;
         const functionalitiesIntent = data.functionalitiesIntent || 0;
@@ -7617,9 +7645,9 @@ const ai = {
         const slidesIntent = data.slidesIntent || 0;
 
         // Finalize response with relevant items and events
-        this.finalizeResponse(responseEl, relevantSlides, relevantFunctionalities, flowIntent, relevantAccounts, accountsIntent, functionalitiesIntent, relevantRelatedCLM, relatedCLMIntent, relevantTemplate, relevantFragments, emailIntent, relevantFlow, slidesIntent);
+        this.finalizeResponse(responseEl, relevantSlides, relevantFunctionalities, relevantAccounts, accountsIntent, functionalitiesIntent, relevantRelatedCLM, relatedCLMIntent, relevantTemplate, relevantFragments, emailIntent, relevantFlow, slidesIntent);
       },
-      finalizeResponse: function(responseEl, relevantSlides, relevantFunctionalities, flowIntent, relevantAccounts, accountsIntent, functionalitiesIntent, relevantRelatedCLM, relatedCLMIntent, relevantTemplate, relevantFragments, emailIntent, relevantFlow, slidesIntent) {
+      finalizeResponse: function(responseEl, relevantSlides, relevantFunctionalities, relevantAccounts, accountsIntent, functionalitiesIntent, relevantRelatedCLM, relatedCLMIntent, relevantTemplate, relevantFragments, emailIntent, relevantFlow, slidesIntent) {
         if (!responseEl) return;
 
         // Only one slides/flow panel is shown per response.
@@ -8356,9 +8384,8 @@ const ai = {
       setResponseEvents: function (responseEl) {
         if (!responseEl) return;
 
-        const relevantItemsTitleEl = responseEl.querySelector('[data-type="com.idc.ai.chat.content.relevantItems.title"]');
-        const relevantItemsBodyEl = responseEl.querySelector('[data-type="com.idc.ai.chat.content.relevantItems.body"]');
-        
+        const relevantItemsTitleEls = responseEl.querySelectorAll('[data-type="com.idc.ai.chat.content.relevantItems.title"]');
+
         const functionalityItems = responseEl.querySelectorAll('[data-type="com.idc.ai.chat.content.relevantItem"][data-functionality-id]');
         
         const slideItems = responseEl.querySelectorAll('[data-type="com.idc.ai.chat.content.relevantItem"][data-slide-id]');
@@ -8366,8 +8393,8 @@ const ai = {
         const openFlowBtn = responseEl.querySelector('[data-type="com.idc.ai.chat.content.relevantItems.openFlowsButton"]');
         const editFlowBtn = responseEl.querySelector('[data-type="com.idc.ai.chat.content.relevantItems.editFlow"]');
 
-        // 1) Handle collapsible toggle
-        if (relevantItemsTitleEl && relevantItemsBodyEl) {
+        // 1) Handle collapsible toggle (every panel of the response)
+        relevantItemsTitleEls.forEach(function (relevantItemsTitleEl) {
           relevantItemsTitleEl.addEventListener("click", function () {
             // Find the enriched container and toggle its expanded state
             const enrichedContainer = relevantItemsTitleEl.closest('[data-type="com.idc.ai.chat.content.enriched"]');
@@ -8401,7 +8428,7 @@ const ai = {
               }, 50); // Small delay to allow CSS transitions to start
             }
           });
-        }
+        });
 
         // 2) Handle relevant slide items
         slideItems.forEach(function (slideEl) {
@@ -8459,31 +8486,53 @@ const ai = {
           if (items && items.length > 0) {
             saveFlowBtn.addEventListener("click", function () {
               // Save flow using customFlows API
-              if (typeof customFlows !== "undefined" && customFlows.api && customFlows.api.createFlow) {
+              if (typeof customFlows === "undefined" || !customFlows.api || !customFlows.api.createFlow) return;
+              if (saveFlowBtn.disabled) return; // a save is already in flight
+              saveFlowBtn.disabled = true;
 
-                // Generate flow name using unified helper function
-                const flowName = ai.api.generateFlowName(accountName);
+              // Failure messages come from the customFlowsMaker labels
+              const cfLabels = (clm.vars.customFlowsMaker && clm.vars.customFlowsMaker.labels) || {};
+              const saveFailedMessage = cfLabels.flowSaveFailed || "Your flows could not be saved. Changes may be lost when the app is closed.";
 
-                // Create flow with source-based items and account association
-                customFlows.api.createFlow({
-                  name: flowName,
-                  items: items,
-                  accountIds: accountId ? [accountId] : [],
-                  accountNames: accountName ? [accountName] : [],
-                }).catch(function(err) {
-                  util.log("ai.ui.chat.setResponseEvents(): createFlow failed: " + err, "error");
-                });
-              }
+              // Generate flow name using unified helper function
+              const flowName = ai.api.generateFlowName(accountName);
 
-              // Find the enriched container and set the saved flag
-              const enrichedContainer = relevantItemsBodyEl.closest('[data-type="com.idc.ai.chat.content.enriched"]');
-              if (enrichedContainer) {
-                enrichedContainer.setAttribute("data-flow-has-been-saved", "true");
-              }
+              // Create flow with source-based items and account association
+              Promise.resolve(customFlows.api.createFlow({
+                name: flowName,
+                items: items,
+                accountIds: accountId ? [accountId] : [],
+                accountNames: accountName ? [accountName] : [],
+              })).then(function (result) {
+                saveFlowBtn.disabled = false; // before the session HTML is written below
+                if (!result || !result.success) {
+                  // Not created. maxFlowsReached carries its own message; other codes (flowNameTooLong,
+                  // flowNameInvalidChars, noVaultIds, ...) use the customFlowsMaker label of the same name if there is one
+                  const code = result && result.error;
+                  util.log("ai.ui.chat.setResponseEvents(): createFlow() refused the flow: " + code, "warn");
+                  alert((result && result.message) || (code && typeof cfLabels[code] === "string" ? cfLabels[code] : saveFailedMessage));
+                  return;
+                }
+                if (!result.saved) {
+                  // Created, but storage failed: customFlows.api.saveFlows() has already alerted labels.flowSaveFailed
+                  util.log("ai.ui.chat.setResponseEvents(): flow " + result.flowId + " created but not saved to storage", "warn");
+                  return;
+                }
 
-              // Update session html to reflect new state (e.g., show open flow button)
-              const container = ai.ui.elements.chat.responseContainer;
-              ai.helpers.updateSessionChatHTML(container.innerHTML);
+                // Find the enriched container and set the saved flag
+                const enrichedContainer = saveFlowBtn.closest('[data-type="com.idc.ai.chat.content.enriched"]');
+                if (enrichedContainer) {
+                  enrichedContainer.setAttribute("data-flow-has-been-saved", "true");
+                }
+
+                // Update session html to reflect new state (e.g., show open flow button)
+                const container = ai.ui.elements.chat.responseContainer;
+                ai.helpers.updateSessionChatHTML(container.innerHTML);
+              }).catch(function (err) {
+                saveFlowBtn.disabled = false;
+                util.log("ai.ui.chat.setResponseEvents(): createFlow failed: " + err, "error");
+                alert(saveFailedMessage);
+              });
             });
           }
         }
@@ -8895,11 +8944,6 @@ const ai = {
           });
         }
 
-      },
-
-      clickAction: function () {
-        // Media mode: open/close chat
-        com.idc.ai.ui.chat.open();
       },
 
       setState: function(state) {
@@ -9381,7 +9425,7 @@ const interactionSummary = {
                   title: null,
                   reaction: null, //positive, neutral, negative
                   duration: null, //seconds
-                  notThisIVASlideFlag: null, //used to indicate that the slide does not belong to this IVA
+                  doesNotBelongToThisIVA: null, //set (true) when the slide does not belong to this IVA
                 },
               ],
             },
@@ -9500,7 +9544,7 @@ const interactionSummary = {
         ],
         thisPresentation: {
           calls: null,
-          lastActivity: null,
+          lastActivityDate: null, //date of the most recent call that showed this presentation
         },
         customFlows: {
           flows: []
@@ -9936,14 +9980,19 @@ const interactionSummary = {
                   thisWeeksSaturday.setDate(thisWeeksSaturday.getDate() + 5); // Mon + 5 = Sat; week is Mon–Fri only
                   thisWeeksSaturday.setHours(0, 0, 0, 0);
 
-                  // Format dates as YYYY-MM-DD
-                  let thisWeeksMondayStr = thisWeeksMonday.toISOString().split('T')[0];
-                  let thisWeeksSaturdayStr = thisWeeksSaturday.toISOString().split('T')[0];
+                  // Bounds as local YYYY-MM-DD dates (the crm drivers single-quote them, as Vault CRM requires), one day wider on each side:
+                  // the CRM compares the UTC datetime with the date, and local midnight can fall on the previous or next UTC day.
+                  // The exact local Mon 00:00 - Sat 00:00 cut is the re-filter when the account records are built (visitingThisWeek)
+                  const localDateStr = (pDate) => `${pDate.getFullYear()}-${String(pDate.getMonth() + 1).padStart(2, "0")}-${String(pDate.getDate()).padStart(2, "0")}`;
+                  let queryFrom = new Date(thisWeeksMonday);
+                  queryFrom.setDate(queryFrom.getDate() - 1); //Sunday before
+                  let queryTo = new Date(thisWeeksSaturday);
+                  queryTo.setDate(queryTo.getDate() + 1); //Sunday after
 
                   // NOTE: add { field: "status", value: "planned" } to return just planned calls
                   let conditions = [
-                    { field: "datetime", op: ">", value: thisWeeksMondayStr },
-                    { field: "datetime", op: "<", value: thisWeeksSaturdayStr },
+                    { field: "datetime", op: ">", value: localDateStr(queryFrom) },
+                    { field: "datetime", op: "<", value: localDateStr(queryTo) },
                   ];
                   if (pAccountId) conditions.unshift({ field: "accountId", value: pAccountId });
 
@@ -11802,8 +11851,12 @@ const interactionSummary = {
 
       //account view
       if (interactionSummary.mode == "accountView" && options.accountView.active) {
+        //no current account record: the model build failed (or found no record for the account); nothing to show
+        if (!output.currentAccount) {
+          util.log(`interactionSummary.ui.init(): no interaction summary model for the current account, open button disabled`, "error");
+        }
         //confirm the account has activity before initializing, otherwise disable open button
-        if (!output.currentAccount.account.flags.noActivity) {
+        if (output.currentAccount && !output.currentAccount.account.flags.noActivity) {
           this.accountView.init();
           this.accountView.populate();
         } else {
@@ -11822,7 +11875,7 @@ const interactionSummary = {
       //modal opened while the model was still being generated: afterOpen found no elements, show the view now
       if (this.pendingAccountView) {
         this.pendingAccountView = false;
-        if (output.currentAccount.account.flags.noActivity) {
+        if (!output.currentAccount || output.currentAccount.account.flags.noActivity) {
           //nothing to show and the open button is now disabled: close the modal
           if (this.elements.modal && typeof this.elements.modal.close === "function") this.elements.modal.close();
         } else {
@@ -11913,8 +11966,9 @@ const interactionSummary = {
       }
     },
     afterClose: function () {
-      //account view not built: closed before ui.init ran (model still in progress) or no activity
-      if (interactionSummary.mode == "accountView" && (!interactionSummary.initialized || interactionSummary.output.currentAccount.account.flags.noActivity)) {
+      //account view not built: closed before ui.init ran (model still in progress), no model (failed build) or no activity
+      const currentAccount = interactionSummary.output.currentAccount;
+      if (interactionSummary.mode == "accountView" && (!interactionSummary.initialized || !currentAccount || currentAccount.account.flags.noActivity)) {
         this.pendingAccountView = false;
         return;
       }
@@ -12182,21 +12236,22 @@ const interactionSummary = {
       setTabsVisibility: function () {
         const vars = clm.vars;
         const visibility = interactionSummary.visibility.accountView;
-        const tab = interactionSummary.ui.elements.tab;
+        const tab = this.elements.tab;
 
         if (!tab) return;
 
-        //hide tabs if necessary
-        if (!visibility.tabs.previousInteractions) {
+        //hide only the tabs set to false (a missing key or block keeps the tab)
+        const tabs = (visibility && visibility.tabs) || {};
+        if (tabs.previousInteractions === false) {
           tab.setInstanceVisibility("previousInteractions", "hidden");
         }
-        if (!visibility.tabs.slides) {
+        if (tabs.slides === false) {
           tab.setInstanceVisibility("slides", "hidden");
         }
-        if (!visibility.tabs.emails) {
+        if (tabs.emails === false) {
           tab.setInstanceVisibility("emails", "hidden");
         }
-        if (!visibility.tabs.relatedCLM) {
+        if (tabs.relatedCLM === false) {
           tab.setInstanceVisibility("relatedCLM", "hidden");
         }
       },
@@ -14019,18 +14074,19 @@ const interactionSummary = {
 
         if (!tab) return;
 
-        //hide tabs if necessary
-        if (!visibility.tabs.plannedCalls) {
+        //hide only the tabs set to false (a missing key or block keeps the tab)
+        const tabs = (visibility && visibility.tabs) || {};
+        if (tabs.plannedCalls === false) {
           tab.setInstanceVisibility("allAccountsPlannedCalls", "hidden");
         }
-        if (!visibility.tabs.presentations) {
+        if (tabs.presentations === false) {
           tab.setInstanceVisibility("allAccountsPresentations", "hidden");
         }
-        if (!visibility.tabs.emails) {
+        if (tabs.emails === false) {
           tab.setInstanceVisibility("allAccountsEmails", "hidden");
         }
-        if (!visibility.tabs.accounts) {
-          tab.setInstanceVisibility("allAccountsAccounts", "hidden");
+        if (tabs.accounts === false) {
+          tab.setInstanceVisibility("allAccountsByAccount", "hidden");
         }
       },
       switchToAccountView: function (accountId) {
@@ -18529,7 +18585,8 @@ const customFlows = {
       
       const itemsToPreview = flow.items || [];
       if (itemsToPreview.length === 0) {
-        alert('This flow has no slides to preview.');
+        const labels = clm.vars.customFlowsMaker.labels || {};
+        alert(labels.previewFlowEmpty || 'This flow has no slides to preview.');
         return;
       }
       
@@ -20081,30 +20138,17 @@ const customFlows = {
 
   /**
    * Open the Custom Flows Maker modal
-   * @param {Object|Array} flowData - Flow data to load, can be:
-   * @param {Object|Array|null} flowData
-   *   - Object with { items: Array } - Array of item objects (new format)
-   *   - Object with { slides: Array, accountName: String } - Legacy slide IDs (auto-converted)
-   *   - Array - Just slide IDs (backwards compatible, auto-converted)
+   * @param {String} intent - 'management' (default) | 'edit' | 'launch' | 'details'
+   * @param {Object|null} flowData - optional { items, name, accountId, accountName }
+   *   - items: source-based flow items ({ source: 'current', id } / { source: 'related', itemId[, nestedId | pageNumber] })
    *   - null/undefined - Opens with empty flow
+   *   Slide-id arrays and { slides: [...] } are not accepted (ignored, with a warning)
    * @example
-   * // Open with items (new format)
-   * customFlows.open('edit', { items: [{ source: 'current', id: 'slide01' }, { source: 'related', itemId: 'CDER-Drug-Safety' }] });
-   *
-   * // Open with slides and account name (legacy)
-   * customFlows.open({ slides: ['slide01', 'slide02'], accountName: 'Dr. Smith' });
-   * 
-   * // Open with just slides
-   * customFlows.open({ slides: ['slide01', 'slide02'] });
-   * 
-   * // Open with slides array only (backwards compatible)
-   * customFlows.open('edit', ['slide01', 'slide02']);
-   * 
    * // Open to management screen (default)
    * customFlows.open();
-   * 
+   *
    * // Open to editor with flow data
-   * customFlows.open('edit', { name: 'Flow Name', slides: ['slide01'] });
+   * customFlows.open('edit', { name: 'Flow Name', items: [{ source: 'current', id: 'slide01' }, { source: 'related', itemId: 'CDER-Drug-Safety' }], accountId: 'acc123', accountName: 'Dr. Smith' });
    */
   open: function(intent, flowData) {
     if (!this.state.initialized) {
@@ -20114,15 +20158,14 @@ const customFlows = {
     // Store intent (default to 'management' if not specified)
     this.state.openIntent = intent || 'management';
 
-    // Normalize flowData to consistent format
+    // flowData: { items, name, accountId, accountName }; slide-id arrays / { slides } are not converted
     let normalizedData = null;
-    
-    if (flowData) {
-      if (Array.isArray(flowData)) {
-        // If flowData is an array, treat it as slides array
-        normalizedData = { slides: flowData };
-      } else if (typeof flowData === 'object') {
-        // If it's an object, use it as-is
+
+    if (flowData && typeof flowData === 'object') {
+      if (Array.isArray(flowData) || (flowData.slides && !flowData.items)) {
+        util.log('customFlows.open(): flowData must carry items ({ source, ... }); slide-id arrays / { slides } are ignored', 'warn');
+      }
+      if (!Array.isArray(flowData)) {
         normalizedData = flowData;
       }
     }
@@ -20571,7 +20614,8 @@ const accountSelector = {
   },
 
   /*close -------------------------------------------------*/
-  close: function () {
+  //pCancelled: false when closing after a selection, Clear or Accept (onCancel only runs on a real cancel: Cancel button, backdrop)
+  close: function (pCancelled) {
     if (!this.state.isOpen) return;
 
     // Clear any pending updates
@@ -20585,8 +20629,8 @@ const accountSelector = {
     this.elements.root.removeAttribute("data-multi-select");
     this.state.isOpen = false;
 
-    // Call cancel callback if provided
-    if (this.config.onCancel) {
+    // Call cancel callback if provided (not after a selection)
+    if (pCancelled !== false && this.config.onCancel) {
       this.config.onCancel();
     }
 
@@ -20840,8 +20884,8 @@ const accountSelector = {
       this.config.onSelect(accountId, accountRecord);
     }
 
-    // Close the selector
-    this.close();
+    // Close the selector (not a cancel)
+    this.close(false);
   },
 
   /*clear selection (single-select) ------------------------*/
@@ -20857,8 +20901,8 @@ const accountSelector = {
       this.config.onSelect(null, null);
     }
 
-    // Close the selector
-    this.close();
+    // Close the selector (not a cancel)
+    this.close(false);
   },
 
   /*is open -----------------------------------------------*/
@@ -20987,7 +21031,7 @@ const accountSelector = {
       if (this.config.onSelect) {
         this.config.onSelect([]);
       }
-      this.close();
+      this.close(false);
       return;
     }
 
@@ -21008,8 +21052,8 @@ const accountSelector = {
       this.config.onSelect(selectedAccounts);
     }
 
-    // Close modal
-    this.close();
+    // Close modal (not a cancel)
+    this.close(false);
   },
 
   /*handle checkbox change --------------------------------*/
@@ -21696,6 +21740,14 @@ const relatedCLMV2 = {
       this.populateItems();
       this.populateFilters();
       this.setEvents();
+
+      // Availability and status line: now if context objects priority 2 (related CLM availability) is read,
+      // otherwise once it is (items carry no data-status until then, so they don't look unavailable)
+      if (clm.contextObjects.loaded >= 2) {
+        this.updateItemsState();
+      } else {
+        clm.contextObjects.ready(2).then(() => this.updateItemsState());
+      }
     },
     
     populateItems: function () {
@@ -22034,7 +22086,10 @@ const relatedCLMV2 = {
           // Rebuild normal view
           this.populateItems();
         }
-        
+
+        // New cards: apply availability and status line again
+        this.updateItemsState();
+
         // After rebuild, apply the filter logic (for non-favorites views)
         if (!nowOnFavorites) {
           this.elements.itemsContainer.querySelectorAll('[data-type="com.idc.ui.relatedCLMV2.item"]').forEach(itemElement => {
@@ -22212,7 +22267,10 @@ const relatedCLMV2 = {
         let pagesArray = this.generatePagesArray(item.pages);
         this.populateDetailPages(pagesArray, itemId);
       }
-      
+
+      // Nested cards take the parent item's availability
+      this.updateItemsState();
+
       // Switch to detail view
       this.setActiveView('detail');
     },
@@ -22317,39 +22375,48 @@ const relatedCLMV2 = {
 
       if (!this.elements.modal) return;
 
+      // Availability is known once context objects priority 2 is read; until then leave the cards as they are
+      if (clm.contextObjects.loaded < 2) return;
+
       // Get items from config
       let items = vars.relatedCLMV2.items || [];
 
-      // Update each item's state with availability and stats
+      // Update each item's cards with availability and stats
       items.forEach((item) => {
-        let itemElement = this.elements.modal.querySelector(`[data-item-id="${item.id}"]`);
-        if (!itemElement) return;
+        let available = !!(item.available || isBrowserMode);
+        let status = available ? 'available' : 'disabled';
 
-        // Update availability status
-        if (item.available || isBrowserMode) {
-          itemElement.setAttribute('data-status', 'available');
-        } else {
-          itemElement.setAttribute('data-status', 'disabled');
-        }
+        // Main grid cards: the item itself and, in the Favorites view, its slide / page cards
+        let itemElements = this.elements.itemsContainer.querySelectorAll(`[data-type="com.idc.ui.relatedCLMV2.item"][data-item-id="${item.id}"]`);
+        itemElements.forEach((itemElement) => {
+          itemElement.setAttribute('data-status', status);
 
-        // Update status (stats display)
-        let itemStatus = itemElement.querySelector('[data-type="com.idc.ui.relatedCLMV2.itemStatus"]');
-        if (itemStatus && vars.relatedCLMV2.options.showItemsStatus) {
-          if (item.available) {
-            if (vars.session.isAnActualCall) {
-              if (item.stats && item.stats.timesDisplayed > 0) {
-                if (item.stats.timesDisplayed == 1) {
-                  itemStatus.innerHTML = labels.discussed_1_time;
-                } else {
-                  itemStatus.innerHTML = labels.discussed_n_times.replace('##count##', item.stats.timesDisplayed);
-                }
+          // Status line (stats are per item: slide / page cards only show "not available")
+          let itemStatus = itemElement.querySelector('[data-type="com.idc.ui.relatedCLMV2.itemStatus"]');
+          if (!itemStatus || !vars.relatedCLMV2.options.showItemsStatus) return;
+          let isSubitem = itemElement.getAttribute('data-is-subitem') === 'true';
+          if (!available) {
+            itemStatus.innerHTML = labels.not_available;
+          } else if (vars.session.isAnActualCall && !isSubitem) {
+            if (item.stats && item.stats.timesDisplayed > 0) {
+              if (item.stats.timesDisplayed == 1) {
+                itemStatus.innerHTML = labels.discussed_1_time;
               } else {
-                itemStatus.innerHTML = labels.not_discussed;
+                itemStatus.innerHTML = labels.discussed_n_times.replace('##count##', item.stats.timesDisplayed);
               }
+            } else {
+              itemStatus.innerHTML = labels.not_discussed;
             }
           } else {
-            itemStatus.innerHTML = labels.not_available;
+            itemStatus.innerHTML = '';
           }
+        });
+
+        // Detail view cards (slides / pages) take the parent item's availability
+        if (this.elements.detailNestedContainer) {
+          this.elements.detailNestedContainer
+            .querySelectorAll(`[data-type="com.idc.ui.relatedCLMV2.nestedItem"][data-parent-id="${item.id}"]`)
+            .forEach((nestedElement) => nestedElement.setAttribute('data-status', status));
         }
       });
     },
@@ -22470,7 +22537,10 @@ const relatedCLMV2 = {
           
           let nestedItem = nestedGoButton.closest('[data-type="com.idc.ui.relatedCLMV2.nestedItem"]');
           if (!nestedItem) return;
-          
+
+          // Prevent interaction with disabled items (same as the main-view GO)
+          if (nestedItem.getAttribute('data-status') === 'disabled') return;
+
           let parentId = nestedItem.getAttribute('data-parent-id');
           let nestedId = nestedItem.getAttribute('data-nested-id');
           let pageNumber = nestedItem.getAttribute('data-nested-page');
@@ -22530,7 +22600,8 @@ const messenger = {
     PREFIX: 'XPRES_',
     BROADCAST_PREFIX: 'XPRES_BROADCAST_',
     TARGETED_PREFIX: 'XPRES_TARGETED_',
-    VERSION: '1.0'
+    VERSION: '1.0',
+    MAX_LOG_ENTRIES: 20 // clm.sessionData.messages.sent / received keep the newest 20 entries each
   },
 
   /* STATE ----------------------------------------------------*/
@@ -22558,28 +22629,36 @@ const messenger = {
   /**
    * Read all messages from sessionStorage and populate clm.sessionData.messages
    * Filters out messages sent by this presentation (only includes messages from others)
+   * Prunes this presentation's targeted messages consumed on an earlier page (they are kept, marked
+   * consumed, until the next init so that the page that consumed them still sees them as consumed)
    * Called automatically during init()
    */
   readMessages: function() {
     const myId = messenger.state.currentPresentationId;
-    
+    if (!clm.sessionData.messages) clm.sessionData.messages = { sent: [], received: [] };
+
+    // Targeted messages pruned at an earlier init are no longer in storage: keep their audit entries
+    const pruned = (clm.sessionData.messages.received || []).filter((m) => m.pattern === 'targeted' && m.consumed);
+
     // Clear received array (will be repopulated from sessionStorage)
     clm.sessionData.messages.received = [];
-    
+
     // Read targeted messages for this presentation (iterate numbered keys)
     if (myId) {
+      const chainPrefix = `${messenger.constants.TARGETED_PREFIX}${myId}_`;
       let index = 1;
       while (index < 1000) { // Safety limit
-        const targetedKey = `${messenger.constants.TARGETED_PREFIX}${myId}_${String(index).padStart(3, '0')}`;
+        const targetedKey = `${chainPrefix}${String(index).padStart(3, '0')}`;
         const targetedData = window.sessionStorage.getItem(targetedKey);
-        
+
         if (!targetedData) break;
-        
+
         try {
           const messages = JSON.parse(targetedData);
+          let prunedHere = false;
           for (let messageType in messages) {
             const msg = messages[messageType];
-            
+
             // Filter: Only add if NOT sent by me
             if (msg.senderId !== myId) {
               clm.sessionData.messages.received.push({
@@ -22587,16 +22666,25 @@ const messenger = {
                 pattern: 'targeted',
                 messageType: msg.type,
                 senderId: msg.senderId,
+                consumed: !!msg.consumed,
                 payload: msg.payload
               });
             }
+
+            // Prune: consumed on an earlier page
+            if (msg.consumed) {
+              delete messages[messageType];
+              prunedHere = true;
+            }
           }
+          if (prunedHere) messenger.helpers.writeKey(targetedKey, messages);
         } catch (error) {
           util.log(`[messenger.readMessages] Error parsing targeted key ${targetedKey}: ${error.message}`, 'error');
         }
-        
+
         index++;
       }
+      messenger.helpers.trimChain(chainPrefix);
     }
     
     // Read all broadcast messages (iterate numbered keys)
@@ -22629,7 +22717,10 @@ const messenger = {
       
       index++;
     }
-    
+
+    clm.sessionData.messages.received = pruned.concat(clm.sessionData.messages.received);
+    messenger.helpers.capLog(clm.sessionData.messages.received);
+
     // Persist to sessionData storage
     storage.sessionData.update();
   },
@@ -22639,7 +22730,7 @@ const messenger = {
     
     /**
      * Send a targeted message to a specific presentation
-     * Message is consumed (deleted) on first read
+     * Message is consumed on first read (marked consumed, deleted at the target's next init)
      * Each sender gets their own numbered key to avoid conflicts
      * 
      * @param {String} targetVaultId - Vault ID of target presentation (e.g., "vv-agency-idc.veevavault.com::44235")
@@ -22652,6 +22743,11 @@ const messenger = {
     sendTargeted: function(targetVaultId, messageType, payload) {
       if (!targetVaultId || !messageType || payload === undefined) {
         util.log('[messenger.sendTargeted] Invalid parameters', 'error');
+        return false;
+      }
+      // Without a sender id the message can't be found again (each send would open a new key with senderId null)
+      if (!messenger.state.currentPresentationId) {
+        util.log(`[messenger.sendTargeted] "${messageType}" not sent: no presentation id (project.vaultExternalID.presentation)`, 'error');
         return false;
       }
 
@@ -22685,14 +22781,13 @@ const messenger = {
         window.sessionStorage.setItem(myKey, JSON.stringify(messages));
         
         // Track in sent array
-        clm.sessionData.messages.sent.push({
+        messenger.helpers.trackSent({
           timestamp: Date.now(),
           pattern: 'targeted',
           messageType: messageType,
           targetId: targetVaultId,
           payload: payload
         });
-        storage.sessionData.update();
         
         return true;
       } catch (error) {
@@ -22726,6 +22821,11 @@ const messenger = {
         util.log('[messenger.sendBroadcast] Invalid parameters', 'error');
         return false;
       }
+      // Without a sender id the key can't be found again (each send would open a new key with senderId null)
+      if (!messenger.state.currentPresentationId) {
+        util.log(`[messenger.sendBroadcast] "${messageType}" not sent: no presentation id (project.vaultExternalID.presentation)`, 'error');
+        return false;
+      }
 
       try {
         // Find this presentation's broadcast key (or create new one)
@@ -22756,13 +22856,12 @@ const messenger = {
         window.sessionStorage.setItem(myKey, JSON.stringify(messages));
         
         // Track in sent array
-        clm.sessionData.messages.sent.push({
+        messenger.helpers.trackSent({
           timestamp: Date.now(),
           pattern: 'broadcast',
           messageType: messageType,
           payload: payload
         });
-        storage.sessionData.update();
         
         return true;
       } catch (error) {
@@ -22773,7 +22872,7 @@ const messenger = {
 
     /**
      * Receive a targeted message for current presentation
-     * Message is automatically consumed (deleted) after reading
+     * Message is automatically consumed after reading (marked consumed; readMessages deletes it at the next init)
      * Iterates through all numbered keys for this presentation
      * 
      * @param {String} messageType - Type of message to receive
@@ -23026,8 +23125,10 @@ const messenger = {
         
         let messages = JSON.parse(existing);
         delete messages[messageType];
-        window.sessionStorage.setItem(myKey, JSON.stringify(messages));
-        
+        // An emptied key is removed (last in the chain) or left as {} for the next send to reuse
+        messenger.helpers.writeKey(myKey, messages);
+        messenger.helpers.trimChain(messenger.constants.BROADCAST_PREFIX);
+
         return true;
       } catch (error) {
         util.log(`[messenger.clearBroadcast] Error: ${error.message}`, 'error');
@@ -23092,12 +23193,15 @@ const messenger = {
           }
           
           let messages = JSON.parse(existing);
-          delete messages[messageType];
-          window.sessionStorage.setItem(key, JSON.stringify(messages));
-          
+          if (Object.prototype.hasOwnProperty.call(messages, messageType)) {
+            delete messages[messageType];
+            messenger.helpers.writeKey(key, messages);
+          }
+
           index++;
         }
-        
+        messenger.helpers.trimChain(`${messenger.constants.TARGETED_PREFIX}${vaultId}_`);
+
         return true;
       } catch (error) {
         util.log(`[messenger.clearTargeted] Error: ${error.message}`, 'error');
@@ -23226,7 +23330,7 @@ const messenger = {
     },
 
     /**
-     * Get the next available broadcast key number
+     * Get the next available broadcast key number: the first missing key, or an emptied one ({}) to reuse
      * 
      * @returns {String} Next broadcast key (e.g., "XPRES_BROADCAST_001")
      */
@@ -23236,7 +23340,7 @@ const messenger = {
       while (index < 1000) { // Safety limit
         const key = `${messenger.constants.BROADCAST_PREFIX}${String(index).padStart(3, '0')}`;
         
-        if (!window.sessionStorage.getItem(key)) {
+        if (messenger.helpers.isFreeKey(window.sessionStorage.getItem(key))) {
           return key;
         }
         
@@ -23289,7 +23393,7 @@ const messenger = {
     },
 
     /**
-     * Get the next available targeted key number for a specific target
+     * Get the next available targeted key number for a specific target: the first missing key, or an emptied one ({}) to reuse
      * 
      * @param {String} targetVaultId - Vault ID of target presentation
      * @returns {String} Next targeted key (e.g., "XPRES_TARGETED_vv-agency-idc.veevavault.com::44235_001")
@@ -23300,7 +23404,7 @@ const messenger = {
       while (index < 1000) { // Safety limit
         const key = `${messenger.constants.TARGETED_PREFIX}${targetVaultId}_${String(index).padStart(3, '0')}`;
         
-        if (!window.sessionStorage.getItem(key)) {
+        if (messenger.helpers.isFreeKey(window.sessionStorage.getItem(key))) {
           return key;
         }
         
@@ -23310,6 +23414,77 @@ const messenger = {
       // Fallback if we somehow exceed 999 presentations
       util.log('[messenger.getNextTargetedKey] Warning: Exceeded maximum targeted keys', 'warn');
       return `${messenger.constants.TARGETED_PREFIX}${targetVaultId}_999`;
+    },
+
+    /**
+     * True when a numbered key can be taken by a new sender: missing, or emptied ({}) by a clear or a prune.
+     * Readers stop at the first missing number, so an emptied key in the middle of the chain is kept as {}
+     * (see trimChain) and reused here instead of opening a new key at the end
+     *
+     * @param {String|null} raw - sessionStorage value of the key
+     * @returns {Boolean}
+     */
+    isFreeKey: function(raw) {
+      if (!raw) return true;
+      try {
+        const messages = JSON.parse(raw);
+        return !!messages && typeof messages === 'object' && Object.keys(messages).length === 0;
+      } catch (error) {
+        return false; // not ours to take
+      }
+    },
+
+    /**
+     * Write a numbered key's messages ({} when none are left; trimChain removes it when it is the last key)
+     *
+     * @param {String} key - Numbered key
+     * @param {Object} messages - Messages by type
+     */
+    writeKey: function(key, messages) {
+      window.sessionStorage.setItem(key, JSON.stringify(messages));
+    },
+
+    /**
+     * Remove emptied ({}) keys from the end of a numbered chain, so keys don't accumulate. Emptied keys before a
+     * key still in use stay as {} (removing them would hide the keys after them from every reader)
+     *
+     * @param {String} chainPrefix - Key without the number (e.g. "XPRES_BROADCAST_")
+     */
+    trimChain: function(chainPrefix) {
+      let last = 0;
+      while (last < 999 && window.sessionStorage.getItem(`${chainPrefix}${String(last + 1).padStart(3, '0')}`)) {
+        last++;
+      }
+      while (last > 0) {
+        const key = `${chainPrefix}${String(last).padStart(3, '0')}`;
+        const raw = window.sessionStorage.getItem(key);
+        if (!raw || !messenger.helpers.isFreeKey(raw)) break;
+        window.sessionStorage.removeItem(key);
+        last--;
+      }
+    },
+
+    /**
+     * Append to clm.sessionData.messages.sent (newest MAX_LOG_ENTRIES kept) and persist session data
+     *
+     * @param {Object} entry - Sent message entry
+     */
+    trackSent: function(entry) {
+      if (!clm.sessionData.messages) clm.sessionData.messages = { sent: [], received: [] };
+      if (!Array.isArray(clm.sessionData.messages.sent)) clm.sessionData.messages.sent = [];
+      clm.sessionData.messages.sent.push(entry);
+      messenger.helpers.capLog(clm.sessionData.messages.sent);
+      storage.sessionData.update();
+    },
+
+    /**
+     * Drop the oldest entries of an audit array beyond MAX_LOG_ENTRIES (in place)
+     *
+     * @param {Array} log - clm.sessionData.messages.sent or received
+     */
+    capLog: function(log) {
+      const max = messenger.constants.MAX_LOG_ENTRIES;
+      if (log.length > max) log.splice(0, log.length - max);
     }
   }
 };
@@ -24047,6 +24222,10 @@ const rteBuilder = {
     if (this.state.initialized) return;
     this.ui.init();
     this.state.initialized = true;
+
+    // Availability comes from context objects priority 3 (approved documents), which runs after init:
+    // refresh the cards after each priority (priority 2 restores the crmIds cached on a previous slide)
+    document.addEventListener("konaContextObjects", () => { rteBuilder.ui.refreshAvailability(); });
   },
 
   open: function (intent, payload) {
@@ -24071,6 +24250,103 @@ const rteBuilder = {
   },
 
   api: {
+    // ---- Availability (approved documents, context objects priority 3) ----
+
+    // Whether an item (template, fragment, banner, salutation, opening, closing) can be sent, by its
+    // session-data group ("rteBuilderTemplates", "rteBuilderFragments", "rteBuilderBanners", ...):
+    //   "available"   — it has a crmId
+    //   "pending"     — its lookup hasn't finished yet (priority 3 still running, or priority 2 hasn't
+    //                   restored a crmId cached on a previous slide); shown like an available item
+    //   "unavailable" — no Vault Doc ID, or the lookup finished without a crmId (failures are cached
+    //                   in session data with crmId null)
+    itemAvailability: function (item, group) {
+      if (!item) return "unavailable";
+      if (item.crmId) return "available";
+      if (!item.vaultId) return "unavailable";
+      if (clm.contextObjects.loaded >= 3) return "unavailable";
+      let approvedDocuments = clm.sessionData && clm.sessionData.approvedDocuments;
+      let cached = !clm.contextObjects.forceDisabledCache && approvedDocuments && Array.isArray(approvedDocuments.items)
+        ? approvedDocuments.items.find((sessionItem) => sessionItem.group === group && sessionItem.id === item.id)
+        : null;
+      if (cached && !cached.crmId) return "unavailable";
+      return "pending";
+    },
+
+    // Availability of a salutation pair; when only one half is given, the best over the pairs it is part of
+    salutationAvailability: function (customization, greetingId, nameFormatId) {
+      let salutations = ((customization && customization.salutations) || []).filter((s) => {
+        return (!greetingId || s.greetingId === greetingId) && (!nameFormatId || s.nameFormatId === nameFormatId);
+      });
+      let states = salutations.map((s) => this.itemAvailability(s, "rteBuilderSalutations"));
+      if (states.includes("available")) return "available";
+      if (states.includes("pending")) return "pending";
+      return "unavailable";
+    },
+
+    // Sets available = false on every item whose lookup finished without a crmId
+    // (context objects only ever set it to true)
+    markUnavailableItems: function () {
+      let rb = clm.vars.rteBuilder;
+      let mark = (items, group) => {
+        (items || []).forEach((item) => {
+          if (this.itemAvailability(item, group) === "unavailable") item.available = false;
+        });
+      };
+      mark(rb.templates, "rteBuilderTemplates");
+      mark(rb.fragments, "rteBuilderFragments");
+      rb.templates.filter((t) => t.customization).forEach((t) => {
+        mark(t.customization.banners,     "rteBuilderBanners");
+        mark(t.customization.salutations, "rteBuilderSalutations");
+        mark(t.customization.openings,    "rteBuilderOpenings");
+        mark(t.customization.closings,    "rteBuilderClosings");
+      });
+    },
+
+    // Send-time check shared by send() and launchApprovedEmail(). Returns false when nothing should be
+    // sent: no template crmId (the rep is told), or the rep cancels the confirm listing the selected
+    // fragments / customization items without a crmId (they would be left out of the email).
+    _confirmSendable: function (template, customizationSelections, fragmentIds) {
+      let vars   = clm.vars;
+      let labels = vars.rteBuilder.labels || {};
+
+      if (!template || !template.crmId) {
+        window.alert(labels.sendTemplateUnavailable || "This email template isn't available to send right now.");
+        return false;
+      }
+
+      let missing = [];
+      let cs = customizationSelections;
+      let c  = template.customization;
+      if (cs && c) {
+        if (cs.bannerId) {
+          let banner = (c.banners || []).find((b) => b.id === cs.bannerId);
+          if (!banner || !banner.crmId) missing.push(labels.customizeBannerLabel || "HEADER BANNER");
+        }
+        if (cs.greetingId && cs.nameFormatId) {
+          let salutation = (c.salutations || []).find((s) => s.greetingId === cs.greetingId && s.nameFormatId === cs.nameFormatId);
+          if (!salutation || !salutation.crmId) missing.push(labels.customizeSalutationLabel || "SALUTATION");
+        }
+        if (cs.openingId) {
+          let opening = (c.openings || []).find((o) => o.id === cs.openingId);
+          if (!opening || !opening.crmId) missing.push(labels.customizeOpeningLabel || "OPENING NOTE");
+        }
+      }
+      fragmentIds.forEach((fragmentId) => {
+        let fragment = vars.rteBuilder.fragments.find((f) => f.id === fragmentId);
+        if (!fragment || !fragment.crmId) missing.push(fragment ? (fragment.title || fragment.id) : fragmentId);
+      });
+      if (cs && c && cs.closingId) {
+        let closing = (c.closings || []).find((cl) => cl.id === cs.closingId);
+        if (!closing || !closing.crmId) missing.push(labels.customizeClosingLabel || "CLOSING NOTE");
+      }
+
+      if (missing.length === 0) return true;
+      util.log("rteBuilder: items without a crmId (left out of the email): " + JSON.stringify(missing), "warn");
+      let msg = labels.sendItemsUnavailableConfirm ||
+        "These items aren't available to send right now and will be left out of the email:\n##items##\n\nSend anyway?";
+      return window.confirm(msg.replace("##items##", missing.map((name) => "• " + name).join("\n")));
+    },
+
     // ---- Presets storage helpers ----
     _getPresetsStore: function () {
       if (!clm.persistentData.rteBuilder) {
@@ -24205,14 +24481,15 @@ const rteBuilder = {
       }
 
       let template = vars.rteBuilder.templates.find((t) => t.id === purpose.templateId);
+      let customizationSelections = template && template.customization ? template.customization.defaults : null;
+      let fragmentIds = Array.isArray(payload && payload.fragmentIds) ? payload.fragmentIds : [];
       if (!template || !template.crmId) {
         util.log("rteBuilder.api.send: missing template or crmId for purposeId '" + purposeId + "'", "error");
-        return;
       }
+      // Tells the rep about a missing template crmId, and confirms items without one
+      if (!this._confirmSendable(template, customizationSelections, fragmentIds)) return;
 
       // Build fragment CRM ID array directly from template defaults + payload fragmentIds
-      let customizationSelections = template.customization ? template.customization.defaults : null;
-      let fragmentIds = Array.isArray(payload && payload.fragmentIds) ? payload.fragmentIds : [];
       let fragmentCrmIds = this._buildFragmentCrmIds(template, customizationSelections, fragmentIds);
 
       // Browser mode: log only, do not call the CRM
@@ -24238,8 +24515,9 @@ const rteBuilder = {
       let template = vars.rteBuilder.templates.find((t) => t.id === state.selectedTemplateId);
       if (!template || !template.crmId) {
         util.log("rteBuilder.api.launchApprovedEmail: missing template or crmId", "error");
-        return;
       }
+      // Tells the rep about a missing template crmId, and confirms items without one
+      if (!this._confirmSendable(template, state.templateCustomization, state.selectedFragmentIds)) return;
 
       // Build fragment CRM ID array
       let fragmentCrmIds = this._buildFragmentCrmIds(template, state.templateCustomization, state.selectedFragmentIds);
@@ -24355,6 +24633,7 @@ const rteBuilder = {
 
       this.populatePurposes();
       this.populateFragments();
+      this.refreshAvailability();
 
       // Register global window callbacks referenced by the modal's data-options attribute
       window["rteBuilderBeforeOpen"] = function () { rteBuilder.ui.beforeOpen(); };
@@ -24433,7 +24712,7 @@ const rteBuilder = {
         let card = template.cloneNode(true);
         card.setAttribute("data-type", "com.idc.rteBuilder.fragmentCard");
         card.setAttribute("data-fragment-id", fragment.id);
-        card.setAttribute("data-status", fragment.available === false ? "disabled" : "unSelected");
+        card.setAttribute("data-status", "unSelected"); // availability applied by refreshAvailability()
 
         // Icon image (fragment.icon — shown in standard mode; thumb wrapper hidden in compact mode)
         let thumbImg = card.querySelector('[data-type="com.idc.rteBuilder.fragmentCard.thumbImg"]');
@@ -24622,19 +24901,130 @@ const rteBuilder = {
       }
     },
 
-    // Resets every (non-disabled) fragment card in the topics view back to its
-    // unselected DOM state. Shared by selectPurpose, _enterTopicsFresh, and beforeOpen.
+    // Resets every fragment card in the topics view back to its unselected DOM state
+    // (unavailable ones to disabled). Callers clear state.selectedFragmentIds first.
+    // Shared by selectPurpose, _enterTopicsFresh, and beforeOpen.
     _resetFragmentCardsToUnselected: function () {
+      this._syncFragmentCards();
+    },
+
+    // Shows / hides the utility-menu open button (concealed while an overlay covers it)
+    _concealOpenButton: function (concealed) {
+      let btn = this.elements.openButton;
+      if (!btn) return;
+      btn.style.opacity = concealed ? "0" : "";
+      btn.setAttribute("data-concealed", concealed ? "true" : "false");
+    },
+
+    // "available" | "pending" | "unavailable" → data-available value ("pending" must not look unavailable)
+    _availabilityAttr: function (availability) {
+      return availability === "unavailable" ? "false" : availability === "pending" ? "pending" : "true";
+    },
+
+    // Sets every fragment card's data-status, data-available and ADD / REMOVE label from the selection
+    // and the fragment's availability. An unavailable card that isn't selected is disabled (can't be added);
+    // a selected one (preset, open intent, or selected before its lookup finished) stays removable.
+    _syncFragmentCards: function () {
       let tv = this.elements.topicsView;
       if (!tv) return;
-      tv.querySelectorAll('[data-type="com.idc.rteBuilder.fragmentCard"]:not([data-status="disabled"])').forEach((card) => {
-        card.setAttribute("data-status", "unSelected");
+      let vars     = clm.vars;
+      let labels   = vars.rteBuilder.labels || {};
+      let selected = rteBuilder.state.selectedFragmentIds;
+
+      tv.querySelectorAll('[data-type="com.idc.rteBuilder.fragmentCard"]').forEach((card) => {
+        let fid          = card.getAttribute("data-fragment-id");
+        let fragment     = vars.rteBuilder.fragments.find((f) => f.id === fid);
+        let availability = rteBuilder.api.itemAvailability(fragment, "rteBuilderFragments");
+        let isSelected   = selected.includes(fid);
+        let isDisabled   = !isSelected && availability === "unavailable";
+
+        card.setAttribute("data-available", this._availabilityAttr(availability));
+        card.setAttribute("data-status", isDisabled ? "disabled" : isSelected ? "selected" : "unSelected");
+
+        let addSpan = card.querySelector('[data-type="com.idc.rteBuilder.fragmentCard.addBtn"] span[data-label]');
+        if (addSpan) {
+          addSpan.textContent = isDisabled
+            ? (labels.fragmentUnavailable || "NOT AVAILABLE")
+            : isSelected
+              ? (labels.fragmentRemoveBtn || "REMOVE")
+              : (labels.fragmentAddBtn    || "ADD");
+        }
+        let addBtn = card.querySelector('[data-type="com.idc.rteBuilder.fragmentCard.addBtn"]');
+        if (addBtn) addBtn.setAttribute("data-action", isDisabled ? "none" : isSelected ? "remove" : "add");
       });
-      let labels = clm.vars.rteBuilder.labels;
-      tv.querySelectorAll('[data-type="com.idc.rteBuilder.fragmentCard.addBtn"] span[data-label]').forEach((span) => {
-        span.textContent = labels.fragmentAddBtn || "ADD";
-      });
-      tv.querySelectorAll('[data-type="com.idc.rteBuilder.fragmentCard.addBtn"]').forEach((btn) => { btn.setAttribute("data-action", "add"); });
+
+      this._syncPreviewAddButton();
+    },
+
+    // ADD TO EMAIL / REMOVE FROM EMAIL in the fragment preview, for the fragment it shows
+    _syncPreviewAddButton: function () {
+      let overlay    = this.elements.fragmentPreview;
+      let fragmentId = rteBuilder.state.previewFragmentId;
+      if (!overlay || !fragmentId) return;
+      let btn = overlay.querySelector('[data-type="com.idc.rteBuilder.fragmentPreview.addToEmailBtn"]');
+      if (!btn) return;
+      let labels     = clm.vars.rteBuilder.labels || {};
+      let fragment   = clm.vars.rteBuilder.fragments.find((f) => f.id === fragmentId);
+      let isSelected = rteBuilder.state.selectedFragmentIds.includes(fragmentId);
+      let isDisabled = !isSelected && rteBuilder.api.itemAvailability(fragment, "rteBuilderFragments") === "unavailable";
+      btn.textContent = isDisabled
+        ? (labels.fragmentUnavailable || "NOT AVAILABLE")
+        : isSelected
+          ? (labels.previewRemoveFromEmailBtn || "REMOVE FROM EMAIL")
+          : (labels.previewAddToEmailBtn      || "ADD TO EMAIL");
+      btn.setAttribute("data-action", isDisabled ? "none" : isSelected ? "remove" : "add");
+      btn.setAttribute("data-state", isDisabled ? "inactive" : "active");
+    },
+
+    // Re-reads availability (api.itemAvailability) into purpose cards, fragment cards and, when open,
+    // the customize overlay. Run at init, after each context objects priority (konaContextObjects),
+    // and on every open.
+    refreshAvailability: function () {
+      let vars = clm.vars;
+      if (!vars.rteBuilder || !Array.isArray(vars.rteBuilder.templates)) return;
+      rteBuilder.api.markUnavailableItems();
+
+      let modal = this.elements.modal;
+      if (modal) {
+        modal.querySelectorAll('[data-type="com.idc.rteBuilder.purposeCard"]').forEach((card) => {
+          let purpose  = vars.rteBuilder.purposes.find((p) => p.id === card.getAttribute("data-purpose-id"));
+          let template = purpose ? vars.rteBuilder.templates.find((t) => t.id === purpose.templateId) : null;
+          card.setAttribute("data-available", this._availabilityAttr(rteBuilder.api.itemAvailability(template, "rteBuilderTemplates")));
+        });
+      }
+
+      this._syncFragmentCards();
+      this._refreshCustomizeAvailability();
+    },
+
+    // data-available on the customize overlay's options (banner cards, greeting / name format rows,
+    // opening / closing rows). A greeting or name format row reflects the salutation pair it would make
+    // with the other half of the working copy (any pair when the other half isn't chosen).
+    _refreshCustomizeAvailability: function () {
+      let state = rteBuilder.state;
+      let co    = this.elements.customizeOverlay;
+      let wc    = state._customizeWorkingCopy;
+      if (!co || !wc) return;
+      let template = clm.vars.rteBuilder.templates.find((t) => t.id === state.selectedTemplateId);
+      if (!template || !template.customization) return;
+      let c   = template.customization;
+      let api = rteBuilder.api;
+
+      let setRows = (selector, fn) => {
+        co.querySelectorAll(selector).forEach((row) => {
+          row.setAttribute("data-available", this._availabilityAttr(fn(row.getAttribute("data-option-id"))));
+        });
+      };
+      setRows('[data-type="com.idc.rteBuilder.bannerOption"]:not([data-option-id="none"])', (id) => api.itemAvailability((c.banners || []).find((b) => b.id === id), "rteBuilderBanners"));
+      setRows('[data-type="com.idc.rteBuilder.radioOption"][data-group="greeting"]',        (id) => api.salutationAvailability(c, id, wc.nameFormatId));
+      setRows('[data-type="com.idc.rteBuilder.radioOption"][data-group="nameFormat"]',      (id) => api.salutationAvailability(c, wc.greetingId, id));
+      setRows('[data-type="com.idc.rteBuilder.textOption"][data-group="opening"]',          (id) => api.itemAvailability((c.openings || []).find((o) => o.id === id), "rteBuilderOpenings"));
+      setRows('[data-type="com.idc.rteBuilder.textOption"][data-group="closing"]',          (id) => api.itemAvailability((c.closings || []).find((cl) => cl.id === id), "rteBuilderClosings"));
+    },
+
+    // True when an option row can't be chosen: unavailable and not the one already chosen
+    _isOptionBlocked: function (row, isChosen) {
+      return !isChosen && row.getAttribute("data-available") === "false";
     },
 
     // Builds the default templateCustomization shape ({bannerId, greetingId, nameFormatId,
@@ -24666,6 +25056,13 @@ const rteBuilder = {
       // Toggle: clicking the already-selected purpose deselects it.
       // Suppressed when forceSelect=true (e.g. called from loadPresetForEdit).
       let isDeselecting = !forceSelect && rteBuilder.state.selectedPurposeId === purposeId;
+
+      // A purpose whose template can't be sent can't be chosen by the rep
+      // (a preset or open intent still selects it; sending then tells the rep)
+      if (!forceSelect && !isDeselecting) {
+        let purposeTemplate = vars.rteBuilder.templates.find((t) => t.id === purpose.templateId);
+        if (rteBuilder.api.itemAvailability(purposeTemplate, "rteBuilderTemplates") === "unavailable") return;
+      }
 
       // Update state
       rteBuilder.state.selectedPurposeId  = isDeselecting ? null : purposeId;
@@ -24752,28 +25149,21 @@ const rteBuilder = {
       if (!tv) return;
 
       let card = tv.querySelector('[data-type="com.idc.rteBuilder.fragmentCard"][data-fragment-id="' + fragmentId + '"]');
-      if (!card || card.getAttribute("data-status") === "disabled") return;
+      if (!card) return;
 
       let isSelected = state.selectedFragmentIds.includes(fragmentId);
 
       if (isSelected) {
         state.selectedFragmentIds = state.selectedFragmentIds.filter((id) => id !== fragmentId);
-        card.setAttribute("data-status", "unSelected");
       } else {
+        // An unavailable fragment can't be added (removing one is always allowed)
+        let fragment = clm.vars.rteBuilder.fragments.find((f) => f.id === fragmentId);
+        if (rteBuilder.api.itemAvailability(fragment, "rteBuilderFragments") === "unavailable") return;
         state.selectedFragmentIds.push(fragmentId);
-        card.setAttribute("data-status", "selected");
       }
 
-      // Swap ADD ↔ REMOVE label on the button span
-      let labels  = clm.vars.rteBuilder.labels;
-      let addSpan = card.querySelector('[data-type="com.idc.rteBuilder.fragmentCard.addBtn"] span[data-label]');
-      if (addSpan) {
-        addSpan.textContent = state.selectedFragmentIds.includes(fragmentId)
-          ? (labels.fragmentRemoveBtn || "REMOVE")
-          : (labels.fragmentAddBtn   || "ADD");
-      }
-      let addBtn = card.querySelector('[data-type="com.idc.rteBuilder.fragmentCard.addBtn"]');
-      if (addBtn) addBtn.setAttribute("data-action", state.selectedFragmentIds.includes(fragmentId) ? "remove" : "add");
+      // data-status, ADD ↔ REMOVE label (and the preview's button) for the new selection
+      this._syncFragmentCards();
 
       this.updateSelectedCount();
       this.updateSendButtonState();
@@ -24854,18 +25244,11 @@ const rteBuilder = {
         });
       }
 
-      // ADD TO EMAIL / REMOVE FROM EMAIL label
-      let addToEmailBtn = overlay.querySelector('[data-type="com.idc.rteBuilder.fragmentPreview.addToEmailBtn"]');
-      if (addToEmailBtn) {
-        let isSelected = rteBuilder.state.selectedFragmentIds.includes(fragmentId);
-        addToEmailBtn.textContent = isSelected
-          ? (labels.previewRemoveFromEmailBtn || "REMOVE FROM EMAIL")
-          : (labels.previewAddToEmailBtn     || "ADD TO EMAIL");
-        addToEmailBtn.setAttribute("data-action", isSelected ? "remove" : "add");
-      }
+      // ADD TO EMAIL / REMOVE FROM EMAIL label (inactive for an unavailable fragment)
+      this._syncPreviewAddButton();
 
       overlay.setAttribute("data-visible", "true");
-      if (this.elements.openButton) { this.elements.openButton.style.opacity = "0"; this.elements.openButton.setAttribute("data-concealed", "true"); }
+      this._concealOpenButton(true);
     },
 
     closePreview: function () {
@@ -24873,7 +25256,7 @@ const rteBuilder = {
       if (!overlay) return;
 
       overlay.setAttribute("data-visible", "false");
-      if (this.elements.openButton) { this.elements.openButton.style.opacity = ""; this.elements.openButton.setAttribute("data-concealed", "false"); }
+      this._concealOpenButton(false);
 
       let linkedList = overlay.querySelector('[data-type="com.idc.rteBuilder.fragmentPreview.linkedList"]');
       if (linkedList) {
@@ -25202,7 +25585,7 @@ const rteBuilder = {
       // Show overlay
       co.setAttribute("data-visible", "true");
       // Hide utilities dual button (close button in the overlay covers the original customizeBtn)
-      if (this.elements.openButton) { this.elements.openButton.style.opacity = "0"; this.elements.openButton.setAttribute("data-concealed", "true"); }
+      this._concealOpenButton(true);
     },
 
     closeCustomizeOverlay: function (commit) {
@@ -25225,7 +25608,7 @@ const rteBuilder = {
       }
 
       // Restore utilities dual button
-      if (this.elements.openButton) { this.elements.openButton.style.opacity = ""; this.elements.openButton.setAttribute("data-concealed", "false"); }
+      this._concealOpenButton(false);
     },
 
     deactivateCustomizeSection: function () {
@@ -25387,6 +25770,9 @@ const rteBuilder = {
         if (closingText)    closingText.textContent = none;
         if (closingSection) closingSection.setAttribute("data-has-value", "false");
       }
+
+      // Option availability depends on the working copy (salutation pairs): refresh on every change
+      this._refreshCustomizeAvailability();
     },
 
     openPresetPreview: function (presetId) {
@@ -25466,7 +25852,7 @@ const rteBuilder = {
       });
 
       overlay.setAttribute("data-visible", "true");
-      if (this.elements.openButton) { this.elements.openButton.style.opacity = "0"; this.elements.openButton.setAttribute("data-concealed", "true"); }
+      this._concealOpenButton(true);
     },
 
     closePresetPreview: function () {
@@ -25474,7 +25860,7 @@ const rteBuilder = {
       let scrollArea = this.elements.presetPreviewScrollArea;
       if (overlay)    overlay.setAttribute("data-visible", "false");
       if (scrollArea) scrollArea.querySelectorAll('[data-type="com.idc.rteBuilder.presetPreview.slot"]').forEach((el) => el.remove());
-      if (this.elements.openButton) { this.elements.openButton.style.opacity = ""; this.elements.openButton.setAttribute("data-concealed", "false"); }
+      this._concealOpenButton(false);
     },
 
     openSavePresetDialog: function () {
@@ -25506,7 +25892,6 @@ const rteBuilder = {
     },
 
     loadPresetForEdit: function (presetId) {
-      let vars   = clm.vars;
       let store  = rteBuilder.api._getPresetsStore();
       let preset = store[presetId];
       if (!preset) return;
@@ -25516,25 +25901,9 @@ const rteBuilder = {
       this.selectPurpose(preset.purposeId, true);
 
       // Restore fragment selection
+      // (an unavailable fragment in the preset stays selected and removable; sending lists it)
       rteBuilder.state.selectedFragmentIds = Array.isArray(preset.fragmentIds) ? preset.fragmentIds.slice() : [];
-      let tv = this.elements.topicsView;
-      if (tv) {
-        tv.querySelectorAll('[data-type="com.idc.rteBuilder.fragmentCard"]:not([data-status="disabled"])').forEach((card) => {
-          let fid = card.getAttribute("data-fragment-id");
-          card.setAttribute("data-status", rteBuilder.state.selectedFragmentIds.includes(fid) ? "selected" : "unSelected");
-        });
-        let labels = vars.rteBuilder.labels;
-        tv.querySelectorAll('[data-type="com.idc.rteBuilder.fragmentCard.addBtn"] span[data-label]').forEach((span) => {
-          let fid = span.closest('[data-type="com.idc.rteBuilder.fragmentCard"]');
-          fid = fid ? fid.getAttribute("data-fragment-id") : null;
-          let isSelected = !!(fid && rteBuilder.state.selectedFragmentIds.includes(fid));
-          span.textContent = isSelected
-            ? (labels.fragmentRemoveBtn || "REMOVE")
-            : (labels.fragmentAddBtn   || "ADD");
-          let addBtn = span.closest('[data-type="com.idc.rteBuilder.fragmentCard.addBtn"]');
-          if (addBtn) addBtn.setAttribute("data-action", isSelected ? "remove" : "add");
-        });
-      }
+      this._syncFragmentCards();
 
       // Restore templateCustomization
       if (preset.templateCustomization) {
@@ -25713,14 +26082,8 @@ const rteBuilder = {
         previewAddBtn.addEventListener("click", () => {
           let fragmentId = rteBuilder.state.previewFragmentId;
           if (!fragmentId) return;
+          // Also updates this button's label (_syncFragmentCards → _syncPreviewAddButton)
           rteBuilder.ui.toggleFragmentSelection(fragmentId);
-          // Update button label to reflect new selection state
-          let labels    = clm.vars.rteBuilder.labels;
-          let isNowSelected = rteBuilder.state.selectedFragmentIds.includes(fragmentId);
-          previewAddBtn.textContent = isNowSelected
-            ? (labels.previewRemoveFromEmailBtn || "REMOVE FROM EMAIL")
-            : (labels.previewAddToEmailBtn     || "ADD TO EMAIL");
-          previewAddBtn.setAttribute("data-action", isNowSelected ? "remove" : "add");
         });
       }
 
@@ -25893,6 +26256,7 @@ const rteBuilder = {
           let oid = card.getAttribute("data-option-id");
           let wc  = rteBuilder.state._customizeWorkingCopy;
           if (!wc) return;
+          if (rteBuilder.ui._isOptionBlocked(card, oid === "none" || oid === wc.bannerId)) return;
           if (oid === "none" || oid === wc.bannerId) {
             // Toggle off / NONE
             wc.bannerId = null;
@@ -25912,6 +26276,7 @@ const rteBuilder = {
           if (!row) return;
           let wc = rteBuilder.state._customizeWorkingCopy;
           if (!wc) return;
+          if (rteBuilder.ui._isOptionBlocked(row, row.getAttribute("data-option-id") === wc.greetingId)) return;
           wc.greetingId = row.getAttribute("data-option-id");
           rteBuilder.ui._reflectWorkingCopyInEditor("salutation");
           rteBuilder.ui.updateCustomizeSummaryPanel();
@@ -25926,6 +26291,7 @@ const rteBuilder = {
           if (!row) return;
           let wc = rteBuilder.state._customizeWorkingCopy;
           if (!wc) return;
+          if (rteBuilder.ui._isOptionBlocked(row, row.getAttribute("data-option-id") === wc.nameFormatId)) return;
           wc.nameFormatId = row.getAttribute("data-option-id");
           rteBuilder.ui._reflectWorkingCopyInEditor("salutation");
           rteBuilder.ui.updateCustomizeSummaryPanel();
@@ -25940,6 +26306,7 @@ const rteBuilder = {
           if (!row) return;
           let wc = rteBuilder.state._customizeWorkingCopy;
           if (!wc) return;
+          if (rteBuilder.ui._isOptionBlocked(row, row.getAttribute("data-option-id") === wc.openingId)) return;
           wc.openingId = row.getAttribute("data-option-id");
           rteBuilder.ui._reflectWorkingCopyInEditor("opening");
           rteBuilder.ui.updateCustomizeSummaryPanel();
@@ -25954,6 +26321,7 @@ const rteBuilder = {
           if (!row) return;
           let wc = rteBuilder.state._customizeWorkingCopy;
           if (!wc) return;
+          if (rteBuilder.ui._isOptionBlocked(row, row.getAttribute("data-option-id") === wc.closingId)) return;
           wc.closingId = row.getAttribute("data-option-id");
           rteBuilder.ui._reflectWorkingCopyInEditor("closing");
           rteBuilder.ui.updateCustomizeSummaryPanel();
@@ -26004,6 +26372,10 @@ const rteBuilder = {
       s.presetSortColumn       = "updated";
       s.presetSortDirection    = "desc";
 
+      // Start clean even if a previous close left an overlay or dialog open (also clears
+      // _customizeWorkingCopy and restores the concealed open button)
+      this._closeAllOverlays();
+
       // Unlock purpose view if it was locked by a preset edit
       let pv = this.elements.purposeView;
       if (pv) {
@@ -26040,8 +26412,8 @@ const rteBuilder = {
         let topicsSearchInput = tv.querySelector('[data-type="com.idc.rteBuilder.headerSearch.input"]');
         if (topicsSearchInput) topicsSearchInput.value = "";
       }
-      // Reset fragment card states
-      this._resetFragmentCardsToUnselected();
+      // Reset fragment card states and re-read availability (purpose and fragment cards)
+      this.refreshAvailability();
       this.updateSelectedCount();
       this.updateSendButtonState();
       this.updateSavePresetButtonState();
@@ -26073,24 +26445,7 @@ const rteBuilder = {
           state.selectedFragmentIds = intent.fragmentIds.slice();
 
           // Update fragment card DOM statuses and ADD/REMOVE labels
-          let tv     = this.elements.topicsView;
-          let labels = clm.vars.rteBuilder.labels;
-          if (tv) {
-            tv.querySelectorAll('[data-type="com.idc.rteBuilder.fragmentCard"]').forEach((card) => {
-              if (card.getAttribute("data-status") === "disabled") return;
-              let fid        = card.getAttribute("data-fragment-id");
-              let isSelected = state.selectedFragmentIds.includes(fid);
-              card.setAttribute("data-status", isSelected ? "selected" : "unSelected");
-              let addSpan = card.querySelector('[data-type="com.idc.rteBuilder.fragmentCard.addBtn"] span[data-label]');
-              if (addSpan) {
-                addSpan.textContent = isSelected
-                  ? (labels.fragmentRemoveBtn || "REMOVE")
-                  : (labels.fragmentAddBtn    || "ADD");
-              }
-              let addBtn = card.querySelector('[data-type="com.idc.rteBuilder.fragmentCard.addBtn"]');
-              if (addBtn) addBtn.setAttribute("data-action", isSelected ? "remove" : "add");
-            });
-          }
+          this._syncFragmentCards();
 
           // Snapshot entry state so BACK doesn't falsely flag unsaved changes
           state.topicsEntryFragmentIds   = state.selectedFragmentIds.slice();
@@ -26123,9 +26478,18 @@ const rteBuilder = {
       modal.setAttribute("data-active-view", "purpose");
       rteBuilder.state.currentView = "purpose";
 
-      // Always clean up preview overlays in case modal was closed while one was open
+      // Always clean up overlays and dialogs in case the modal was closed while one was open
+      this._closeAllOverlays();
+    },
+
+    // Closes the fragment preview, preset preview, customize overlay (discarding its working copy)
+    // and save-preset dialog, and shows the open button again. Shared by afterClose and beforeOpen.
+    _closeAllOverlays: function () {
       this.closePreview();
       this.closePresetPreview();
+      this.closeCustomizeOverlay(false);
+      this.closeSavePresetDialog();
+      this._concealOpenButton(false);
     },
 
   },
@@ -26916,7 +27280,7 @@ const clm = {
       cached: null,
       output: {
         currentAccount: null,
-        names: null,
+        contentItems: null,
       },
     },
     ai: {
@@ -28314,7 +28678,6 @@ const clm = {
       
       // Method and streaming
       vars.ai.config.streaming = util.readSetting(com_idc_params, "ai.config.streaming", "boolean", true);
-      vars.ai.config.smartNextClickAction = util.readSetting(com_idc_params, "ai.config.smartNextClickAction", "string", "preview");
       vars.ai.config.chatPosition.left = util.readSetting(com_idc_params, "ai.config.chatPosition.left", "number", 100);
       vars.ai.config.chatPosition.top  = util.readSetting(com_idc_params, "ai.config.chatPosition.top",  "number", 100);
       vars.ai.config.smartNextFlowPosition.left = util.readSetting(com_idc_params, "ai.config.smartNextFlowPosition.left", "number", null);
@@ -29789,7 +30152,7 @@ const clm = {
       }
       
       // Extract vault ID (strip https://)
-      let targetVaultId = targetPresentation.replace('https://', '');
+      let targetVaultId = String(targetPresentation || '').replace('https://', ''); // null when its {{token}} is unresolved
       
       // Send targeted message
       messenger.api.sendTargeted(targetVaultId, 'pdfPage', { pageNumber });

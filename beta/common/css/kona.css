@@ -1,6 +1,6 @@
 /* 
  * Kona CSS Build
- * kona library __20261124-214628-ckby3q7__
+ * kona library __20261124-225004-y0p9k9n__
  */
 
 
@@ -12064,7 +12064,8 @@ body[data-slide-id="Common"] [data-type="com.idc.pdf"] {
 }
 
 /* Disabled state */
-#relatedCLMV2 [data-type="com.idc.ui.relatedCLMV2.item"][data-status="disabled"] {
+#relatedCLMV2 [data-type="com.idc.ui.relatedCLMV2.item"][data-status="disabled"],
+#relatedCLMV2 [data-type="com.idc.ui.relatedCLMV2.nestedItem"][data-status="disabled"] {
   opacity: 0.5;
 }
 /* Thumbnail container */
@@ -13318,6 +13319,15 @@ body[data-slide-id="Common"] [data-type="com.idc.pdf"] {
   }
 }
 
+/* Unavailable template (no CRM id once looked up): dimmed, can't be selected */
+#rteBuilder [data-type="com.idc.rteBuilder.purposeCard"][data-available="false"] {
+  opacity: 0.4;
+}
+#rteBuilder [data-type="com.idc.rteBuilder.purposeCard"][data-available="false"]
+  [data-type="com.idc.rteBuilder.purposeCard.selectBtn"] {
+  pointer-events: none;
+}
+
 /* --- Card top: icon + title --- */
 
 #rteBuilder [data-type="com.idc.rteBuilder.purposeCard.top"] {
@@ -13794,6 +13804,26 @@ body[data-slide-id="Common"] [data-type="com.idc.pdf"] {
 @layer low-priority {
   #rteBuilder [data-type="com.idc.rteBuilder.fragmentCard"][data-status="selected"] {
     border-color: #2c3e6b;
+  }
+}
+
+/* Unavailable (approved-document lookup finished without a CRM id; data-available="pending" looks
+   available). Unselected ones are also data-status="disabled": ADD shows fragmentUnavailable and is inert */
+#rteBuilder [data-type="com.idc.rteBuilder.fragmentCard"][data-available="false"] {
+  opacity: 0.45;
+}
+#rteBuilder [data-type="com.idc.rteBuilder.fragmentCard"][data-status="disabled"]
+  [data-type="com.idc.rteBuilder.fragmentCard.addBtn"] {
+  pointer-events: none;
+}
+#rteBuilder [data-type="com.idc.rteBuilder.fragmentCard"][data-status="disabled"]
+  [data-type="com.idc.rteBuilder.fragmentCard.addBtn"] i {
+  display: none;
+}
+@layer low-priority {
+  #rteBuilder [data-type="com.idc.rteBuilder.fragmentCard"][data-status="disabled"]
+    [data-type="com.idc.rteBuilder.fragmentCard.addBtn"] {
+    background: #9a9a9a;
   }
 }
 
@@ -14531,6 +14561,15 @@ body[data-slide-id="Common"] [data-type="com.idc.pdf"] {
   font-size: 18px;
   font-weight: 300;
   line-height: 1;
+}
+
+/* Unavailable fragment (not selected): label fragmentUnavailable, inert */
+#rteBuilder [data-type="com.idc.rteBuilder.fragmentPreview.addToEmailBtn"][data-state="inactive"] {
+  pointer-events: none;
+  opacity: 0.5;
+}
+#rteBuilder [data-type="com.idc.rteBuilder.fragmentPreview.addToEmailBtn"][data-state="inactive"]::after {
+  content: none;
 }
 
 
@@ -15284,6 +15323,15 @@ body[data-slide-id="Common"] [data-type="com.idc.pdf"] {
 #rteBuilder [data-type="com.idc.rteBuilder.radioOptionTemplate"],
 #rteBuilder [data-type="com.idc.rteBuilder.textOptionTemplate"] {
   display: none !important;
+}
+
+/* ---- Unavailable customization option (no CRM id once looked up; a greeting / name format row
+   reflects the salutation pair it would make). Dimmed; JS ignores taps unless it is the chosen one ---- */
+
+#rteBuilder [data-type="com.idc.rteBuilder.bannerOption"][data-available="false"],
+#rteBuilder [data-type="com.idc.rteBuilder.radioOption"][data-available="false"],
+#rteBuilder [data-type="com.idc.rteBuilder.textOption"][data-available="false"] {
+  opacity: 0.4;
 }
 
 /* ---- Radio option (live clone) ---- */

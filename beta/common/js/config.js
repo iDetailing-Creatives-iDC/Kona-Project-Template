@@ -824,6 +824,7 @@ let com_idc_params = {
       "flowSavedConfirmation": "Flow saved successfully",
       "flowNotFound": "Flow not found",
       "flowSaveFailed": "Your flows could not be saved. Changes may be lost when the app is closed.",
+      "previewFlowEmpty": "This flow has no slides to preview.",
       "flowSaved": "Flow saved!",
       "flowUpdated": "Flow updated!",
       "flowDeleted": "Flow deleted",
@@ -919,6 +920,10 @@ let com_idc_params = {
       "filterVisitingThisWeek": "Visiting this week",
       "filterAccountsWithActivity": "Accounts with activity",
       "saveFlowBtn": "Save Flow",
+      "editFlowBtn": "Edit Flow",
+      "relevantEmail": "Suggested Email",
+      "sendEmailBtn": "Send Email",
+      "editEmailBtn": "Edit & Send",
       "openCustomFlowsButton": "Open Custom Flows Maker",
       "saveFlowConfirmation": "The flow has been saved for the next iteration with this account.",
       "saveFlowConfirmationNoAccount": "The flow has been saved.",
@@ -1064,7 +1069,10 @@ let com_idc_params = {
       "customizeResetBtn": "RESET",
       "customizeNoneBannerLabel": "NONE",
       "customizeCloseBtn": "CLOSE",
-      "customizeFragmentsPlaceholder": "SELECTED TOPICS HERE"
+      "customizeFragmentsPlaceholder": "SELECTED TOPICS HERE",
+      "fragmentUnavailable": "NOT AVAILABLE",
+      "sendTemplateUnavailable": "This email template isn't available to send right now.",
+      "sendItemsUnavailableConfirm": "These items aren't available to send right now and will be left out of the email:\n##items##\n\nSend anyway?"
     }
   },
   "templates": {

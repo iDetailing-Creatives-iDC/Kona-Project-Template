@@ -13424,35 +13424,6 @@ com.idc.templates = {
             ],
             "childNodes": [
               {
-                "type": "BUTTON",
-                "attributes": [
-                  {
-                    "type": "button"
-                  },
-                  {
-                    "data-type": "com.idc.rteBuilder.customizeOverlay.closeBtn"
-                  }
-                ],
-                "childNodes": [
-                  {
-                    "type": "SPAN",
-                    "attributes": [
-                      {
-                        "data-label": "customizeEmailTemplateBtn"
-                      }
-                    ]
-                  },
-                  {
-                    "type": "I",
-                    "attributes": [
-                      {
-                        "class": "gg-close"
-                      }
-                    ]
-                  }
-                ]
-              },
-              {
                 "type": "DIV",
                 "attributes": [
                   {
@@ -14239,6 +14210,35 @@ com.idc.templates = {
                   }
                 ],
                 "childNodes": [
+                  {
+                    "type": "BUTTON",
+                    "attributes": [
+                      {
+                        "type": "button"
+                      },
+                      {
+                        "data-type": "com.idc.rteBuilder.customizeOverlay.closeBtn"
+                      }
+                    ],
+                    "childNodes": [
+                      {
+                        "type": "SPAN",
+                        "attributes": [
+                          {
+                            "data-label": "customizeEmailTemplateBtn"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "I",
+                        "attributes": [
+                          {
+                            "class": "gg-close"
+                          }
+                        ]
+                      }
+                    ]
+                  },
                   {
                     "type": "DIV",
                     "attributes": [

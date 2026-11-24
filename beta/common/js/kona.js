@@ -1,6 +1,6 @@
 "use strict";
 
-const BUILD_ID = "kona library __20261023-183032-9qxciy6__";
+const BUILD_ID = "kona library __20261124-214628-ckby3q7__";
 console.log("%cBuild:", "color:#888", BUILD_ID);
 
 (function (global) {

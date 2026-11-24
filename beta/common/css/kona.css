@@ -1,6 +1,6 @@
 /* 
  * Kona CSS Build
- * kona library __20261023-183032-9qxciy6__
+ * kona library __20261124-214628-ckby3q7__
  */
 
 
@@ -11953,6 +11953,7 @@ body[data-slide-id="Common"] [data-type="com.idc.pdf"] {
   overflow: hidden;
   height: 100%;
   padding-top: 50px; /* Account for fixed header height */
+  box-sizing: border-box; /* keep the padding inside the 100%: without it the views end 50px below the modal and the detail footer (BACK) is off-screen */
 }
 
 /* Track container - holds both views side-by-side */
@@ -12713,10 +12714,16 @@ body[data-slide-id="Common"] [data-type="com.idc.pdf"] {
   position: relative;
 }
 
+/* Anchored to the clip instead of height: 100%. iPad WebKit can resolve a percentage height inside the
+   flex: 1 clip against the whole content area (ignoring the title bar), which pushes the views' footers
+   below the modal (found on an iPad 12.9" in the EYLEA HD demo, 2026-10-23). */
 #rteBuilder [data-ui-id="rteBuilderTrack"] {
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
   display: flex;
   width: 300%;
-  height: 100%;
   transition: transform 0.35s ease;
 }
 
@@ -12750,13 +12757,15 @@ body[data-slide-id="Common"] [data-type="com.idc.pdf"] {
   overflow: hidden;
 }
 
-/* Purpose + Topics views: padded dark shell so the white card floats with margins */
+/* All three views: padded dark shell so the white card floats with margins */
 #rteBuilder [data-ui-id="rteBuilderPurposeView"],
+#rteBuilder [data-ui-id="rteBuilderPresetsView"],
 #rteBuilder [data-ui-id="rteBuilderTopicsView"] {
   padding: 16px 20px 0;
 }
 @layer low-priority {
   #rteBuilder [data-ui-id="rteBuilderPurposeView"],
+  #rteBuilder [data-ui-id="rteBuilderPresetsView"],
   #rteBuilder [data-ui-id="rteBuilderTopicsView"] {
     background: #2d3340;
   }
@@ -13084,6 +13093,7 @@ body[data-slide-id="Common"] [data-type="com.idc.pdf"] {
   align-items: center;
   justify-content: center;
   padding: 10px 20px;
+  margin: 4px 0 10px; /* same bottom gap as the purpose / topics footers */
   background: none;
 }
 @layer low-priority {
@@ -14828,7 +14838,7 @@ body[data-slide-id="Common"] [data-type="com.idc.pdf"] {
   display: flex;
   align-items: stretch;
   flex-direction: column;
-  padding: 14px;
+  padding: 64px 14px 14px; /* top: below the 50px chrome bar, which sits under the iOS status bar in the CRM app */
   gap: 12px;
   opacity: 0;
   visibility: hidden;
@@ -15369,12 +15379,12 @@ body[data-slide-id="Common"] [data-type="com.idc.pdf"] {
 }
 
 
-/* ---- Overlay close button: absolutely positioned at bottom-left, on top of topicsView.customizeBtn ---- */
+/* ---- Overlay close button: left column of the editor footer, level with CANCEL · SAVE AND CLOSE · RESET ---- */
 
 #rteBuilder [data-type="com.idc.rteBuilder.customizeOverlay.closeBtn"] {
-  position: absolute;
-  bottom: 21px;
-  left: 20px;
+  grid-column: 1;
+  justify-self: start;
+  margin-left: 6px;
   display: inline-flex;
   align-items: center;
   gap: 7px;
@@ -15399,15 +15409,25 @@ body[data-slide-id="Common"] [data-type="com.idc.pdf"] {
    CUSTOMIZE EMAIL TEMPLATE — FOOTER (independent of panels)
    ================================================ */
 
+/* Projects whose common/index.html still has the button as a direct child of the overlay (HTML before 2026-11-24) */
+#rteBuilder [data-ui-id="rteBuilderCustomizeOverlay"] > [data-type="com.idc.rteBuilder.customizeOverlay.closeBtn"] {
+  position: absolute;
+  bottom: 21px;
+  left: 20px;
+  margin-left: 0;
+}
+
+/* Same grid as the topics view footer: close button left, button group centred */
 #rteBuilder [data-type="com.idc.rteBuilder.customizeOverlay.editorFooter"] {
   flex-shrink: 0;
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
-  justify-content: center;
 }
 
 /* White pill wrapper around the three buttons */
 #rteBuilder [data-type="com.idc.rteBuilder.customizeOverlay.editorFooter.btnGroup"] {
+  grid-column: 2;
   display: inline-flex;
   align-items: center;
   gap: 4px;

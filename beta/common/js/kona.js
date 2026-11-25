@@ -1,6 +1,8 @@
 "use strict";
 
-const BUILD_ID = "kona library __20261124-225004-y0p9k9n__";
+const BUILD_ID = "kona library __20261125-201704-8q0izhq__";
+const KONA_VERSION = "4.4.0";
+console.log("%cKona:", "color:#888", KONA_VERSION);
 console.log("%cBuild:", "color:#888", BUILD_ID);
 
 (function (global) {
@@ -5445,7 +5447,11 @@ const inspector = {
       delete vars.standaloneModalGroups;
       delete vars.references;
 
-      let treeData = vars;
+      //framework version and build first, so they can be read on the device
+      let treeData = { kona: { version: com.idc.version, build: com.idc.buildId } };
+      Object.keys(vars).forEach((key) => {
+        treeData[key] = vars[key];
+      });
 
       //render
       const textAreaContainer = this.dropDown.element.querySelector('[data-type="com.idc.ui.core.tab.content"][data-instance="vars"]');
@@ -30917,6 +30923,8 @@ const clm = {
 
 
   // --- NAMESPACE SETUP ---
+  global.com.idc.version = KONA_VERSION;
+  global.com.idc.buildId = BUILD_ID;
   global.com.idc.inspector = inspector;
   global.com.idc.clm = clm;
   global.com.idc.util = util;

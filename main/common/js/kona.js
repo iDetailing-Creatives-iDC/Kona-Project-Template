@@ -1,10 +1,15 @@
 "use strict";
 
-const BUILD_ID = "kona library __20260825-155025-0f0eee6__";
+const BUILD_ID = "kona library __20261125-172703-1c28962__";
+const KONA_VERSION = "3.3.0";
+console.log("Kona " + KONA_VERSION);
 console.log(BUILD_ID);
 
 if (com == null) var com = {};
 if (com.idc == undefined) com.idc = {};
+
+com.idc.version = KONA_VERSION;
+com.idc.buildId = BUILD_ID;
 
 com.idc.clm = {
   varsTemplate: {

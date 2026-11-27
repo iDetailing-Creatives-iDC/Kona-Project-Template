@@ -1,7 +1,7 @@
 "use strict";
 
-const BUILD_ID = "kona library __20261125-201704-8q0izhq__";
-const KONA_VERSION = "4.4.0";
+const BUILD_ID = "kona library __20261127-134603-9lr0avw__";
+const KONA_VERSION = "4.4.1";
 console.log("%cKona:", "color:#888", KONA_VERSION);
 console.log("%cBuild:", "color:#888", BUILD_ID);
 
@@ -11874,6 +11874,15 @@ const interactionSummary = {
       if (interactionSummary.mode == "allAccountsView" && options.allAccountsView.active) {
         this.accountView.init();
         this.allAccountsView.init();
+      }
+
+      //current mode's view is off (all accounts view outside a call, account view in a call): nothing to show, disable the open button (Kona 3 did this outside a call)
+      if (
+        !(interactionSummary.mode == "accountView" && options.accountView.active) &&
+        !(interactionSummary.mode == "allAccountsView" && options.allAccountsView.active)
+      ) {
+        util.log(`interactionSummary.ui.init(): ${interactionSummary.mode} is off, open button disabled`);
+        this.disableOpenButton();
       }
 
       interactionSummary.initialized = true;
